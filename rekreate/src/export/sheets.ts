@@ -1,3 +1,4 @@
+import { buildHook, checkDate } from '../pitch/hooks.ts';
 import type { Lead } from '../lead/signals.ts';
 
 /**
@@ -38,6 +39,9 @@ export type SheetLead = {
   niche: string;
   searchLocation: string;
   googleRefreshedAt: string;
+  /** The opening line, derived from what the audit measured. Empty when nothing honest could be said. */
+  hook: string;
+  hookBasis: string;
 };
 
 export type SheetRun = {
@@ -85,6 +89,11 @@ export type SheetsTarget = {
 export type PushContext = { niche: string; location: string; refreshedAt: string };
 
 export function toSheetLead(lead: Lead, context: PushContext): SheetLead {
+  const hook = buildHook(lead, {
+    niche: context.niche,
+    checkedOn: checkDate(context.refreshedAt),
+  });
+
   return {
     id: lead.id,
     name: lead.name,
@@ -110,6 +119,10 @@ export function toSheetLead(lead: Lead, context: PushContext): SheetLead {
     niche: context.niche,
     searchLocation: context.location,
     googleRefreshedAt: context.refreshedAt,
+    hook: hook.text,
+    // When there is no hook, the cell says WHY rather than sitting blank — a
+    // lead with no gap needs a different approach, not a silent gap in the sheet.
+    hookBasis: hook.text ? hook.basis : (hook.reason ?? 'none'),
   };
 }
 

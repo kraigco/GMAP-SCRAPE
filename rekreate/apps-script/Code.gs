@@ -78,11 +78,18 @@ const COLUMNS = [
   'google_refreshed_at', // Z ─┘
   'review_status',   // AA yours
   'notes',           // AB yours
+  'hook',            // AC derived from the audit — refreshed
+  'hook_basis',      // AD which finding the hook rests on
 ];
 
-/** The block a re-scrape is allowed to overwrite: last_seen … google_refreshed_at. */
-const REFRESH_FROM = 2;
-const REFRESH_TO = 25;
+/**
+ * The blocks a re-scrape may overwrite, as [from, to] index pairs.
+ *
+ * Two ranges rather than one because your columns sit in the middle: the
+ * scraper owns C..Z and AC..AD, you own AA..AB, and nothing the scraper does
+ * can reach across that gap.
+ */
+const REFRESH_RANGES = [[2, 25], [28, 29]];
 
 const RUN_COLUMNS = [
   'finished_at', 'location', 'niche', 'terms', 'prospects', 'with_email',
@@ -148,7 +155,14 @@ function ingest(leads, run) {
     const sheet = tab(LEADS_TAB, COLUMNS);
     const width = COLUMNS.length;
     const lastRow = sheet.getLastRow();
-    const existing = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, width).getValues() : [];
+    // Read the sheet's own width, then pad — rows written before a column was
+    // added come back short, and setValues rejects a ragged block.
+    const stored = Math.max(sheet.getLastColumn(), width);
+    const existing = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, stored).getValues() : [];
+    for (let i = 0; i < existing.length; i++) {
+      while (existing[i].length < width) existing[i].push('');
+      existing[i].length = width;
+    }
 
     const seen = {};
     for (let i = 0; i < existing.length; i++) {
@@ -198,7 +212,10 @@ function ingest(leads, run) {
 
 /** Copy only the columns a re-scrape owns. first_listed and your two stay put. */
 function refresh(target, incoming) {
-  for (let i = REFRESH_FROM; i <= REFRESH_TO; i++) target[i] = incoming[i];
+  for (let r = 0; r < REFRESH_RANGES.length; r++) {
+    const range = REFRESH_RANGES[r];
+    for (let i = range[0]; i <= range[1]; i++) target[i] = incoming[i];
+  }
 }
 
 function toRow(lead, now) {
@@ -232,6 +249,8 @@ function toRow(lead, now) {
     str(l.googleRefreshedAt),
     'unreviewed',
     '',
+    str(l.hook),
+    str(l.hookBasis),
   ];
 }
 
@@ -294,6 +313,19 @@ function tab(name, headers) {
     sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
     sheet.setFrozenRows(1);
     sheet.setColumnWidth(1, 60);   // place_id is a key, not something to read
+    return sheet;
+  }
+
+  // A sheet written by an older version has fewer columns than this one now
+  // defines. Appending the missing headers is safe — every existing column
+  // keeps its position, so no row shifts and nothing already written moves out
+  // from under the header it belongs to.
+  const width = sheet.getLastColumn();
+  if (width < headers.length) {
+    const missing = headers.slice(width);
+    const range = sheet.getRange(1, width + 1, 1, missing.length);
+    range.setValues([missing]);
+    range.setFontWeight('bold');
   }
   return sheet;
 }
