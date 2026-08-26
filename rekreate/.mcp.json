@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "rekoll": {
+      "command": "C:\\Users\\kraig\\AppData\\Local\\pipx\\pipx\\venvs\\rekoll\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "rekoll.mcp_server",
+        "--tenant",
+        "default",
+        "--project",
+        "default",
+        "--agent",
+        "default"
+      ]
+    }
+  }
+}

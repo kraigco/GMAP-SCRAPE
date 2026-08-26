@@ -1,0 +1,109 @@
+---
+description: Rekreate Lead Intelligence Engine — architecture and hard constraints
+alwaysApply: true
+---
+
+# Project: Rekreate Lead Intelligence Engine
+
+## What this is
+An automated B2B lead discovery and technical-audit pipeline for Rekreate Digital,
+a Manila-based agency that builds and runs custom AI agents and web platforms for
+clients ("we build it, you own it, we run it").
+
+The engine finds local service businesses on Google Maps, audits their public web
+infrastructure for conversion gaps, scores them against an ICP, and drafts an
+outbound hook grounded in the specific gaps found.
+
+First target segment: property management companies in Greater Philadelphia.
+That segment is chosen because Rekreate has a matching case study — Two River
+Development, a Philadelphia affordable-housing company for whom Rekreate built an
+operations platform and public website as one system.
+
+## Tech stack (do not substitute without asking)
+- TypeScript, Node 20+, ESM
+- Postgres (Supabase or local docker) — raw SQL via `postgres` or `pg`. No ORM.
+- `zod` for validating every external response before it enters the system
+- `vitest` for tests
+- `commander` for the CLI
+- Anthropic SDK for the pitch stage
+- No web framework, no UI, no queue system in v1
+
+## Hard constraints — violating any of these is a bug, not a style choice
+
+1. **Google Text Search caps at 60 results per query, 20 per page, 3 pages max.**
+   A single query never represents a market. All discovery MUST use recursive
+   rectangle tiling: search a bbox, and when it returns 60 results, split it into
+   four quadrants and search each. Recurse until tiles return under 60 or max
+   depth is reached. Dedupe on `place_id`.
+
+2. **Use Places API (New) only** — `POST https://places.googleapis.com/v1/places:searchText`.
+   The legacy Places API cannot be enabled on new GCP projects.
+
+3. **The field mask is fixed.** Exactly:
+   `places.id, places.displayName, places.formattedAddress, places.nationalPhoneNumber,
+    places.websiteUri, places.rating, places.userRatingCount, places.businessStatus,
+    places.primaryType, places.types, places.location, nextPageToken`
+   Places API (New) bills at the highest tier among requested fields. This mask is
+   Enterprise (~$35 per 1,000 calls). Adding `places.reviews` or `places.photos`
+   re-prices every call at ~$40 per 1,000 for data this project does not use.
+   Never add fields to this mask without an explicit instruction.
+
+4. **Never make Place Details calls for enrichment.** Phone, website, rating and
+   review count all come back in the search call. A per-result Details call
+   multiplies cost by ~20x for identical data. The only permitted Details call is
+   an ID-only refresh, which is free.
+
+5. **Storage rules follow Google's terms, and they are not optional.**
+   - `place_id` may be stored indefinitely. It is the primary key.
+   - All other Google-sourced fields (name, address, phone, rating, review count)
+     are a cache. Every row carries `google_refreshed_at`. Anything older than 30
+     days is stale and must be re-fetched or excluded from exports.
+   - Data derived from the prospect's OWN website (the audit), and data this
+     project generates (scores, gaps, pitch hooks, outreach state), is Rekreate's
+     own and has no TTL.
+   - Design the schema so the Google cache and the derived data are separate
+     tables. Never denormalise them into one wide table.
+
+6. **Hard cost ceiling on every run.** A configurable `maxCalls` that halts the
+   sweep, plus estimated USD cost logged at the end of every run. A runaway
+   recursion must be impossible, not unlikely.
+
+7. **The LLM never sees raw HTML.** The audit stage produces a structured `gaps`
+   array. The pitch stage takes only `{ name, rating, reviewCount, gaps }`. This
+   is what stops the model inventing problems the prospect does not have.
+
+8. **The LLM only runs on leads above the score threshold.** Scoring is
+   deterministic and free; generation is neither.
+
+9. **Scoring is pure functions.** `score(lead) -> { score, tier, reasons, gaps }`
+   with no I/O, no clock reads, no randomness. It must be unit-testable with
+   fixtures and it must be trivial to change weights without touching the pipeline.
+
+10. **No email sending in v1.** The pipeline ends at a reviewed export. Outbound
+    sending is a separate decision with its own domain and warm-up.
+
+11. **Idempotent runs.** Re-running the same sweep updates rows, never duplicates
+    them. Upsert on `place_id`.
+
+12. **Secrets live in `.env`, which is gitignored.** Commit `.env.example` with
+    keys and empty values. Never write a key into source, a test, or a comment.
+
+## Verify before you write
+Before writing any Places API request, read the current Text Search (New)
+reference at
+https://developers.google.com/maps/documentation/places/web-service/text-search
+and confirm the request body shape, the `locationRestriction.rectangle` format,
+and the pagination fields. Do not rely on memory of this API — it changed shape
+in 2025 and older patterns are wrong.
+
+Same for the Anthropic SDK: check the current model identifiers rather than
+assuming. The blueprint this project came from specifies "Claude 3.5 Sonnet",
+which is outdated.
+
+## Working style
+- Propose a plan before writing code for any phase. Wait for approval.
+- One phase at a time. Do not scaffold ahead.
+- Ask before adding any dependency not listed above.
+- Never write mock or fallback data that lets a broken API call look successful.
+  A failed request should fail loudly with the status and body.
+- Every module gets tests before the phase is considered done.

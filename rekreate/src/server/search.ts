@@ -1,0 +1,254 @@
+import { auditSite } from '../audit/site.ts';
+import { mapPool } from '../lib/concurrency.ts';
+import { createPlacesClient } from '../places/client.ts';
+import { dedupeById } from '../places/dedupe.ts';
+import { estimateCostUsd } from '../places/field-mask.ts';
+import { resolveLocation, termsForNiche } from '../places/geocode.ts';
+import { resolveNiche } from '../config/niches/property-management.ts';
+import type { RawPlace } from '../places/schema.ts';
+import { sweepTiles } from '../places/tiling.ts';
+import { summarise, toLead } from '../lead/signals.ts';
+import { filterLeads, filterPlaces, mergeReports } from '../lead/filters.ts';
+import type { FilterReport, LeadFilters } from '../lead/filters.ts';
+import type { Lead } from '../lead/signals.ts';
+
+/**
+ * One search, end to end: geocode a place name, sweep it, visit every site.
+ *
+ * Deliberately knows nothing about HTTP. It takes plain parameters, reports
+ * progress through a callback, and returns plain data — so the localhost server
+ * and a future Kodex route can both call it without either owning it.
+ */
+
+export type SearchParams = {
+  location: string;
+  niche: string;
+  maxCalls?: number;
+  maxDepth?: number;
+  /**
+   * Use only the first N phrasings of the niche.
+   *
+   * Every term is a FULL sweep of the box, so this multiplies the cost of a
+   * search directly: four terms is four times the calls of one. More terms find
+   * genuinely different businesses, so this is a coverage decision rather than
+   * a tuning knob — which is why the number actually used is reported back.
+   */
+  maxTerms?: number;
+  audit?: boolean;
+  concurrency?: number;
+  filters?: LeadFilters;
+  /**
+   * Abort the sweep. Every Places call after this fires is money spent on an
+   * answer nobody is waiting for, so the budget stops here.
+   *
+   * Cooperative on purpose. It stops the sweep ISSUING work rather than killing
+   * work in flight: a Places request already sent is already billable, and an
+   * audit fetch killed mid-flight would record a live site as unreachable. So
+   * requests already out finish, nothing new starts, and what was paid for is
+   * still returned and still written to disk.
+   */
+  signal?: AbortSignal;
+};
+
+export type SearchProgress = {
+  stage: 'geocode' | 'sweep' | 'audit' | 'done';
+  message: string;
+  callsUsed: number;
+  found: number;
+  pct: number;
+};
+
+export type SearchResult = {
+  run: {
+    location: string;
+    niche: string;
+    terms: string[];
+    /**
+     * How many phrasings existed for this niche. When it exceeds `terms.length`
+     * the sweep deliberately covered less than it could have, and the caller
+     * must be able to say so rather than present a partial answer as a whole one.
+     */
+    termsAvailable: number;
+    maxCalls: number;
+    maxDepth: number;
+    callsUsed: number;
+    tilesSearched: number;
+    tilesSplit: number;
+    truncatedLeaves: number;
+    duplicatesDropped: number;
+    estimatedCostUsd: number;
+    halted: boolean;
+    /** The caller went away and the sweep stopped short of the market. */
+    aborted: boolean;
+    audited: boolean;
+    sitesFetched: number;
+    finishedAt: string;
+  };
+  totals: Record<string, number | string>;
+  leads: Lead[];
+  /** What the quality filters removed, and why. Never silent. */
+  filtered: FilterReport;
+};
+
+/** `fetchImpl` is injected only by the tests — the server passes the real one. */
+export type SearchDeps = { apiKey: string; fetchImpl?: typeof fetch };
+
+export async function runSearch(
+  params: SearchParams,
+  deps: SearchDeps,
+  onProgress: (p: SearchProgress) => void = () => {},
+): Promise<SearchResult> {
+  const location = params.location.trim();
+  const niche = params.niche.trim();
+  if (!location) throw new Error('A location is required.');
+  if (!niche) throw new Error('A niche is required.');
+
+  const maxCalls = Math.max(1, Math.min(1000, params.maxCalls ?? 200));
+  const maxDepth = Math.max(0, Math.min(5, params.maxDepth ?? 3));
+  const doAudit = params.audit !== false;
+  const concurrency = params.concurrency ?? 8;
+
+  const stopped = (): boolean => params.signal?.aborted === true;
+  // Built once and spread, because `exactOptionalPropertyTypes` refuses an
+  // explicit `fetchImpl: undefined` on an optional property.
+  const net = deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {};
+
+  // A saved config brings curated terms; anything else gets generated ones.
+  let available: string[];
+  try {
+    available = resolveNiche(niche).keywords;
+  } catch {
+    available = termsForNiche(niche);
+  }
+
+  const requested = params.maxTerms;
+  const terms =
+    requested !== undefined && Number.isFinite(requested) && requested > 0
+      ? available.slice(0, Math.floor(requested))
+      : available;
+
+  const report = (stage: SearchProgress['stage'], message: string, callsUsed: number, found: number, pct: number): void =>
+    onProgress({ stage, message, callsUsed, found, pct });
+
+  report('geocode', `Resolving "${location}"…`, 0, 0, 2);
+  const place = await resolveLocation(location, { apiKey: deps.apiKey, ...net });
+
+  const client = createPlacesClient({
+    apiKey: deps.apiKey,
+    maxCalls,
+    shouldStop: stopped,
+    ...net,
+  });
+  const batches: RawPlace[][] = [];
+  let tilesSearched = 0;
+  let tilesSplit = 0;
+  let truncatedLeaves = 0;
+  let halted = false;
+
+  for (const [i, term] of terms.entries()) {
+    if (stopped()) break;
+    if (client.budgetExhausted()) {
+      halted = true;
+      break;
+    }
+    report(
+      'sweep',
+      `Searching "${term}" in ${place.formattedAddress}…`,
+      client.callsUsed(),
+      batches.flat().length,
+      5 + Math.round((i / terms.length) * (doAudit ? 45 : 90)),
+    );
+
+    const sweep = await sweepTiles<RawPlace>(
+      place.bbox,
+      async (bbox) => {
+        const tile = await client.searchTile(term, bbox);
+        return { items: tile.places, truncated: tile.truncated };
+      },
+      { maxDepth, shouldHalt: () => client.budgetExhausted() || stopped() },
+    );
+
+    batches.push(sweep.items);
+    tilesSearched += sweep.tilesSearched;
+    tilesSplit += sweep.tilesSplit;
+    truncatedLeaves += sweep.truncatedLeaves;
+    halted = halted || sweep.halted;
+  }
+
+  const { unique, duplicatesDropped } = dedupeById(batches);
+
+  const filters = params.filters ?? {};
+  const pre = filterPlaces(unique, filters);
+  const candidates = pre.kept;
+
+  if (pre.report.dropped.length) {
+    const removed = pre.report.considered - pre.report.kept;
+    report(
+      'audit',
+      `Filtered out ${removed} of ${pre.report.considered} on rating and reviews…`,
+      client.callsUsed(),
+      candidates.length,
+      50,
+    );
+  }
+
+  let leads: Lead[];
+  let sitesFetched = 0;
+
+  if (doAudit && candidates.length) {
+    const withSite = candidates.filter((p) => p.websiteUri).length;
+    report('audit', `Visiting ${withSite} websites for contact details…`, client.callsUsed(), candidates.length, 52);
+
+    const audits = await mapPool(
+      candidates,
+      concurrency,
+      // A null audit means "not visited", which `toLead` reports as unaudited
+      // rather than as a site with nothing on it. Skipping is honest; inventing
+      // a failed audit for a site we never called would not be.
+      async (p) => (stopped() ? null : auditSite(p.id, p.websiteUri ?? null, net)),
+      (done, total) => {
+        if (done % 5 === 0 || done === total) {
+          report('audit', `Visited ${done} of ${total} sites…`, client.callsUsed(), candidates.length,
+            52 + Math.round((done / total) * 45));
+        }
+      },
+    );
+    sitesFetched = audits.filter((a) => a !== null && a.pagesFetched > 0).length;
+    leads = candidates.map((p, i) => toLead(p, audits[i] ?? null));
+  } else {
+    leads = candidates.map((p) => toLead(p, null));
+  }
+
+  // Only the audit knows whether a contact address exists, so this pass cannot
+  // run any earlier than here.
+  const post = filterLeads(leads, filters);
+  leads = post.kept;
+
+  const callsUsed = client.callsUsed();
+  report('done', `${leads.length} prospects found.`, callsUsed, leads.length, 100);
+
+  return {
+    run: {
+      location: place.formattedAddress,
+      niche,
+      terms,
+      termsAvailable: available.length,
+      maxCalls,
+      maxDepth,
+      callsUsed,
+      tilesSearched,
+      tilesSplit,
+      truncatedLeaves,
+      duplicatesDropped,
+      estimatedCostUsd: estimateCostUsd(callsUsed),
+      halted,
+      aborted: stopped(),
+      audited: doAudit,
+      sitesFetched,
+      finishedAt: new Date().toISOString(),
+    },
+    totals: summarise(leads),
+    leads,
+    filtered: mergeReports(pre.report, post.report),
+  };
+}

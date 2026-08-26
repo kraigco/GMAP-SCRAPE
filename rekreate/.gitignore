@@ -1,0 +1,32 @@
+# secrets — constraint 12
+.env
+.env.*
+!.env.example
+*.pem
+*-service-account.json
+
+# OAuth user credentials. The token file holds a refresh token that does not
+# expire on an Internal consent screen — it is a live credential for as long as
+# the consent stands, and needs exactly the care a service-account key would.
+*-token.json
+client_secret*.json
+*.apps.googleusercontent.com.json
+
+# dependencies
+node_modules/
+
+# build / test artifacts
+dist/
+coverage/
+*.tsbuildinfo
+
+# run output (exports, logs)
+out/
+*.log
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.rekoll/

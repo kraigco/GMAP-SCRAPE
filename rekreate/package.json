@@ -1,0 +1,30 @@
+{
+  "name": "rekreate-lead-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rekreate Lead Intelligence Engine — B2B lead discovery, technical audit, scoring and outbound-hook pipeline",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "cli": "node src/cli/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "node src/db/migrate.ts",
+    "verify": "node src/cli/verify.ts",
+    "dashboard": "node src/server/http.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
+    "commander": "^14.0.2",
+    "postgres": "^3.4.7",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
