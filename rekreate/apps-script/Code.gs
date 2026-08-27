@@ -136,12 +136,30 @@ function doGet(e) {
     return json({ ok: true, service: 'rekreate-ingest', authorised: false });
   }
 
-  const sheet = book().getSheetByName(LEADS_TAB);
-  return json({
-    ok: true,
-    service: 'rekreate-ingest',
-    leads: sheet ? Math.max(0, sheet.getLastRow() - 1) : 0,
-  });
+  // book() throws when the script is not bound to a sheet. Unhandled, that
+  // returns an HTML error page, and an HTML body is indistinguishable from
+  // Google's sign-in interstitial — so the health check would report a
+  // permissions problem for what is actually a configuration one.
+  try {
+    const sheet = book().getSheetByName(LEADS_TAB);
+    return json({
+      ok: true,
+      service: 'rekreate-ingest',
+      leads: sheet ? Math.max(0, sheet.getLastRow() - 1) : 0,
+      // A deployment is a SNAPSHOT: saving the editor changes nothing until
+      // you redeploy a new version. Reporting the column set this code knows
+      // about makes "did the redeploy take?" a question you can answer by
+      // reading a health check, instead of by pushing rows and squinting at
+      // the sheet.
+      columns: COLUMNS,
+    });
+  } catch (err) {
+    return json({
+      ok: false,
+      service: 'rekreate-ingest',
+      error: String(err && err.message ? err.message : err),
+    });
+  }
 }
 
 /* -------------------------------------------------------------------- write */

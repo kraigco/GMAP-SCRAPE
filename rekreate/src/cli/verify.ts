@@ -82,6 +82,31 @@ if (!mapsKey) {
     fail('live search', `HTTP ${res.status} — billing is not attached to this project`,
       'console.cloud.google.com/billing — link a billing account to THIS project.\n' +
       'You stay inside the free tier at our volume, but Google will not issue quota without a card on file.');
+  } else if (res.status === 429) {
+    // The 429 body names the exact limit and its value in details[].metadata.
+    // Reading it turns "the sweep died early" into a number you can act on: a
+    // cap in the low hundreds is what an unbilled project gets, not evidence
+    // that the engine is misbehaving.
+    let meta: Record<string, string> | undefined;
+    try {
+      const parsed = JSON.parse(text) as {
+        error?: { details?: { metadata?: Record<string, string> }[] };
+      };
+      meta = parsed.error?.details?.find((d) => d.metadata?.['quota_limit_value'])?.metadata;
+    } catch {
+      meta = undefined;
+    }
+    const cap = meta?.['quota_limit_value'];
+    const limitName = meta?.['quota_limit'];
+    fail(
+      'live search',
+      `HTTP 429 — the daily Places quota is spent${cap ? `, and the cap is only ${cap}/day` : ''}`,
+      `${limitName ? `Limit: ${limitName}\n` : ''}` +
+        'It resets at midnight US Pacific. A cap in the low hundreds means no billing\n' +
+        'account is attached — Google caps an unbilled project hard however little you use.\n' +
+        'Fix: console.cloud.google.com/billing — link an account to THIS project, then\n' +
+        'raise it at console.cloud.google.com/apis/api/places.googleapis.com/quotas',
+    );
   } else if (res.status === 400 && text.includes('API key not valid')) {
     fail('live search', 'the key itself is rejected', 'It may have been deleted or regenerated. Copy the current value from Credentials.');
   } else {
@@ -90,15 +115,16 @@ if (!mapsKey) {
 }
 
 // ------------------------------------------------------------- sheets
-console.log('\nGoogle Sheets — service account');
+console.log('\nGoogle Sheets — service account (optional)');
 
 if (!sheetId) {
   fail('spreadsheet id', 'GOOGLE_SHEETS_SPREADSHEET_ID is empty', 'It is the part of the sheet URL between /d/ and /edit');
 } else if (!existsSync(keyFile)) {
-  fail('key file', `not found at ${keyFile}`,
-    'IAM & Admin > Service Accounts > Create service account (skip the roles step)\n' +
-    'then open it > Keys > Add key > Create new key > JSON, and save it to that path.');
-  skip('sheet access', 'no key file');
+  // Optional, and deliberately not a failure. Leads reach the sheet through the
+  // Apps Script Web App checked below - that is the only writer in the pipeline,
+  // and loadServiceAccount is called from nowhere else in src/. A red FAIL here
+  // for an unused credential buries the blockers that actually stop work.
+  skip('service account', `no key at ${keyFile} - the Apps Script Web App below is what writes leads`);
 } else {
   let token = '';
   try {
@@ -149,6 +175,75 @@ if (!sheetId) {
       } else {
         fail('write access', `HTTP ${add.status} — shared, but read-only`,
           'Re-share the sheet with the service account as EDITOR rather than Viewer.');
+      }
+    }
+  }
+}
+
+// ------------------------------------------------- sheets, via the apps script
+console.log('\nGoogle Sheets — Apps Script Web App (the path that writes leads)');
+
+const webappUrl = process.env['SHEETS_WEBAPP_URL']?.trim() ?? '';
+const webappToken = process.env['SHEETS_INGEST_TOKEN']?.trim() ?? '';
+
+if (!webappUrl || !webappToken) {
+  skip('web app', 'SHEETS_WEBAPP_URL and SHEETS_INGEST_TOKEN are not both set in .env');
+} else {
+  // Google serves an HTML sign-in interstitial here for two different reasons:
+  // a deployment that genuinely requires sign-in, and a momentary hiccup under
+  // back-to-back requests. They are indistinguishable from the body, so only a
+  // failure that survives every attempt gets blamed on configuration — the same
+  // rule pushLeads follows.
+  type Health = { authorised?: boolean; leads?: number; columns?: string[] };
+  const ATTEMPTS = 3;
+  let health: Health | null = null;
+  let lastBody = '';
+
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+    const probe = await fetch(`${webappUrl}?token=${encodeURIComponent(webappToken)}`, {
+      redirect: 'follow',
+    });
+    lastBody = await probe.text();
+
+    // An Apps Script web app answers HTTP 200 for everything, thrown errors
+    // included, so the verdict lives in the body and never in the status code.
+    try {
+      health = JSON.parse(lastBody) as Health;
+      break;
+    } catch {
+      health = null;
+    }
+    if (attempt < ATTEMPTS) await new Promise((r) => setTimeout(r, 400 * attempt));
+  }
+
+  if (!health) {
+    fail('web app', `no JSON after ${ATTEMPTS} attempts — ${lastBody.slice(0, 80).replace(/\s+/g, ' ')}`,
+      'A sign-in page on every attempt means the deployment is not public.\n' +
+      'Deploy > Manage deployments > pencil > Who has access: Anyone > Deploy.');
+  } else if (health.authorised === false) {
+    fail('ingest token', 'the web app rejected SHEETS_INGEST_TOKEN',
+      'Apps Script editor > Project Settings > Script Properties > INGEST_TOKEN\n' +
+      'must match SHEETS_INGEST_TOKEN in .env exactly.');
+  } else {
+    pass('web app', `reachable — ${health.leads ?? 0} lead(s) in the Leads tab`);
+
+    // A deployment is a SNAPSHOT of the code as it stood when you deployed it.
+    // Asking the live app which columns it knows about is the only way to tell
+    // a redeploy that took from an editor save that did nothing.
+    const deployed = health.columns;
+    if (!deployed) {
+      fail('deployed version', 'the live deployment is older than this check — it cannot report its columns',
+        'Re-paste apps-script/Code.gs into the Apps Script editor, then\n' +
+        'Deploy > Manage deployments > pencil > Version: NEW VERSION > Deploy.\n' +
+        'Use Manage deployments, never New deployment, or the /exec URL changes.');
+    } else {
+      const missing = ['hook', 'hook_basis'].filter((c) => !deployed.includes(c));
+      if (missing.length > 0) {
+        fail('deployed version', `live, but missing column(s): ${missing.join(', ')}`,
+          'Re-paste apps-script/Code.gs, then Deploy > Manage deployments > pencil >\n' +
+          'Version: NEW VERSION > Deploy.');
+      } else {
+        pass('deployed version', `${deployed.length} columns — hook and hook_basis present`);
       }
     }
   }
