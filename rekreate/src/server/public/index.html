@@ -474,6 +474,8 @@
   .quota-num { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
   .quota-foot { font-size: 10px; color: var(--text-faint); }
   .quota-foot.blocked { color: var(--warn-text); }
+  td.collected { white-space: nowrap; color: var(--text-faint); font-size: 11px; }
+  th[data-sort="collected"] { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -1245,6 +1247,24 @@
     ].map((s) => '<div class="stat ' + s.c + '"><span class="n">' + s.n + '</span><span class="l">' + s.l + '</span></div>').join('');
   }
 
+  /**
+   * The same counts a search reports, derived from rows instead.
+   *
+   * Deliberately reuses the FILTERS predicates rather than restating the rules:
+   * two definitions of "slow" would drift, and the chip and the stat beside it
+   * would disagree about the same lead.
+   */
+  function totalsOf(rows) {
+    const by = (id) => rows.filter(FILTERS.find((f) => f.id === id).test).length;
+    return {
+      withEmail: by('has-email'),
+      noSite: by('no-site'),
+      down: by('down'),
+      insecure: by('insecure'),
+      slow: by('slow'),
+    };
+  }
+
   function renderLists() {
     document.getElementById('lists').innerHTML = Object.entries(LISTS).map(([id, l]) => {
       const count = id === 'prospects' ? leads.length : null;
@@ -1335,10 +1355,14 @@
     if (!l.collectedAt) return '<span class="none">this search</span>';
     const d = new Date(l.collectedAt);
     if (Number.isNaN(d.getTime())) return '<span class="none">—</span>';
+    // Relative time alone, with the full date on hover. Two stacked lines
+    // pushed this column off the right edge of the panel, and "10h ago" is
+    // what the eye is scanning for anyway — the exact timestamp is a detail
+    // you go looking for, not one you read down a list.
     // ago() already exists for the recent-searches list; one relative-time
     // format across the page beats two that round differently.
-    return '<span class="mono">' + esc(d.toLocaleDateString([], { day: '2-digit', month: 'short' })) +
-      '</span><span class="sub">' + esc(ago(l.collectedAt)) + '</span>';
+    return '<span class="mono" title="' + esc(d.toLocaleString()) + '">' +
+      esc(ago(l.collectedAt) || d.toLocaleDateString([], { day: '2-digit', month: 'short' })) + '</span>';
   }
 
   /**
@@ -1365,10 +1389,24 @@
         fromSheet = true;
         sheetTotal = body.total;
         page = 0;
+        // A search fills totals from the server. Sheet rows arrive without it,
+        // and every panel that reads it would otherwise show zero next to a
+        // table holding hundreds of rows — the list count and the campaign
+        // audience both did exactly that.
+        totals = totalsOf(leads);
         renderChips();
+        renderLists();
+        renderAudience();
         renderTable();
       })
-      .catch(() => {});
+      .catch((err) => {
+        // Swallowing this hid a render error behind an empty table that looked
+        // exactly like "nothing collected yet". If the sheet loaded but the
+        // page could not draw it, say so.
+        console.error('loadStoredLeads:', err);
+        const label = document.getElementById('count-label');
+        if (label) label.textContent = 'Could not display the sheet — ' + (err && err.message ? err.message : err);
+      });
   }
 
   function renderTable() {
