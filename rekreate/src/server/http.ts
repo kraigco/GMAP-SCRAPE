@@ -12,6 +12,7 @@ import { leadToEnrichedRow, parseEnrichedCsv, renderEnrichedCsv } from '../expor
 import { parseSearchBaseName, searchBaseName, writeUnique } from '../export/search-file.ts';
 import { SIGNAL_LABELS, SLOW_TTFB_MS, summarise, THIN_REVIEW_COUNT } from '../lead/signals.ts';
 import { describeResult, isConfigured, pushLeads, toSheetLead } from '../export/sheets.ts';
+import { peek } from '../places/usage.ts';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { EnrichedRow } from '../export/csv.ts';
 import type { IngestResult } from '../export/sheets.ts';
@@ -146,7 +147,7 @@ async function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL)
         signal: control.signal,
         ...(maxTerms === undefined ? {} : { maxTerms }),
       },
-      { apiKey: env.GOOGLE_MAPS_API_KEY },
+      { apiKey: env.GOOGLE_MAPS_API_KEY, dailyCap: env.PLACES_DAILY_LIMIT },
       (p) => { if (!aborted) sseSend(res, 'progress', p); },
     );
 
@@ -353,7 +354,14 @@ const server = createServer((req, res) => {
         // Same reason as the signals above: the page must not hardcode a budget
         // that .env can change, or the sizing hint will describe a run you would
         // not actually get. maxCalls is the backstop, maxResults the default cap.
-        budget: { maxCalls: env.MAX_CALLS, maxResults: env.MAX_RESULTS },
+        budget: {
+          maxCalls: env.MAX_CALLS,
+          maxResults: env.MAX_RESULTS,
+          // Served for the same reason as the other two: this default lived in
+          // three places at once (env 4, search.ts 3, the page 2) and disagreed
+          // with itself. env.MAX_TILE_DEPTH is now the only definition.
+          maxDepth: env.MAX_TILE_DEPTH,
+        },
       }),
     );
     return;
@@ -379,8 +387,41 @@ const server = createServer((req, res) => {
         res.end(JSON.stringify(body));
       })
       .catch((err: unknown) => {
+        // An ENOENT from fs carries the absolute path it tried, which puts the
+        // server's directory layout in a response body. The caller asked for a
+        // file by name and either got it or did not; nothing else is its
+        // business. The real reason still goes to the console for debugging.
+        if (err instanceof Error) console.error(`search-file: ${err.message}`);
+        const known = err instanceof Error && err.message === 'bad file name';
         res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'not found' }));
+        res.end(JSON.stringify({ error: known ? 'bad file name' : 'no such search' }));
+      });
+    return;
+  }
+
+  // What the free allowance looks like right now, read straight from the same
+  // ledger a sweep reserves against — not a second copy of the arithmetic. A
+  // budget you cannot see before you spend it is one you find out about after.
+  if (url.pathname === '/api/quota') {
+    // The request handler is not async, so this follows the same then/catch
+    // shape the other asynchronous routes use.
+    peek({ dayCap: env.PLACES_DAILY_LIMIT })
+      .then((q) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            day: { used: q.dayUsed, cap: q.dayCap, remaining: q.dayRemaining, resetsAt: q.dayResetsAt },
+            month: { used: q.used, cap: q.cap, remaining: q.remaining, resetsAt: q.resetsAt },
+            // The tighter of the two is what stops the next sweep.
+            canSearch: q.dayRemaining > 0 && q.remaining > 0,
+          }),
+        );
+      })
+      .catch((err: unknown) => {
+        // A ledger that cannot be read must not take the dashboard down with
+        // it — the page still works, it just cannot show a budget.
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'unreadable' }));
       });
     return;
   }

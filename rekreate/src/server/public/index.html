@@ -452,6 +452,24 @@
     main { padding: 20px 16px 32px; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+  /* Free-tier meter. Two ceilings apply and the tighter one binds, so both
+     are always visible rather than only whichever is closer. */
+  .quota {
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 8px 10px; min-width: 208px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .quota-row { display: grid; grid-template-columns: 40px 1fr auto; align-items: center; gap: 8px; }
+  .quota-label { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); }
+  .quota-bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .quota-bar i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--good); transition: width .3s ease; }
+  .quota-bar i.warn { background: var(--warn); }
+  .quota-bar i.bad  { background: var(--bad, #EF4444); }
+  .quota-num { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .quota-foot { font-size: 10px; color: var(--text-faint); }
+  .quota-foot.blocked { color: var(--warn-text); }
 </style>
 </head>
 <body>
@@ -572,6 +590,22 @@
         </p>
       </div>
       <div class="head-actions">
+        <!-- The free Places allowance, read from the same ledger a sweep
+             reserves against. Shown before a search rather than discovered
+             after one. -->
+        <div class="quota" id="quota" hidden>
+          <div class="quota-row">
+            <span class="quota-label">Today</span>
+            <span class="quota-bar"><i id="quota-day-fill"></i></span>
+            <span class="quota-num" id="quota-day-num">—</span>
+          </div>
+          <div class="quota-row">
+            <span class="quota-label">Month</span>
+            <span class="quota-bar"><i id="quota-month-fill"></i></span>
+            <span class="quota-num" id="quota-month-num">—</span>
+          </div>
+          <div class="quota-foot" id="quota-foot"></div>
+        </div>
         <button class="btn" id="export" disabled>Export CSV</button>
       </div>
     </div>
@@ -599,7 +633,7 @@
         </label>
         <label class="f narrow">
           <span>Split depth</span>
-          <input id="q-depth" class="field" type="number" placeholder="2" min="0" max="5"
+          <input id="q-depth" class="field" type="number" placeholder="1" min="0" max="5"
                  title="How many times a full tile may be quartered. Google caps every query at 60 results, so a busy area has to be split to be seen.">
         </label>
         <label class="f narrow">
@@ -788,6 +822,66 @@
       .join('');
   };
 
+
+  /* ------------------------------------------------------- free-tier meter */
+
+  /**
+   * Two ceilings govern a sweep: Google's daily quota and the monthly free
+   * tier. The tighter one binds, so both are drawn and the footer names
+   * whichever is actually in the way.
+   *
+   * Refreshed after every search because that is when the numbers move, and on
+   * a slow timer so a tab left open overnight does not keep showing yesterday.
+   */
+  function paintQuota(q) {
+    const box = document.getElementById('quota');
+    if (!box || !q) return;
+
+    const draw = (fillId, numId, part) => {
+      const pct = part.cap > 0 ? Math.min(100, Math.round((part.used / part.cap) * 100)) : 0;
+      const fill = document.getElementById(fillId);
+      fill.style.width = pct + '%';
+      // Colour by what is LEFT, not by what is used: 'almost gone' is the
+      // thing worth reacting to.
+      fill.className = part.remaining === 0 ? 'bad' : pct >= 80 ? 'warn' : '';
+      document.getElementById(numId).textContent = part.used + ' / ' + part.cap;
+    };
+
+    draw('quota-day-fill', 'quota-day-num', q.day);
+    draw('quota-month-fill', 'quota-month-num', q.month);
+
+    const foot = document.getElementById('quota-foot');
+    if (!q.canSearch) {
+      const which = q.day.remaining === 0 ? q.day : q.month;
+      const label = q.day.remaining === 0 ? 'Daily' : 'Monthly';
+      foot.textContent = label + ' allowance spent — returns ' + whenLocal(which.resetsAt);
+      foot.classList.add('blocked');
+    } else {
+      foot.textContent = q.day.remaining + ' calls left today, ' + q.month.remaining + ' this month';
+      foot.classList.remove('blocked');
+    }
+    box.hidden = false;
+  }
+
+  /** A reset time is only useful in the reader's own timezone. */
+  function whenLocal(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return 'soon';
+    return d.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  }
+
+  function refreshQuota() {
+    fetch('/api/quota')
+      .then((r) => (r.ok ? r.json() : null))
+      // A ledger that cannot be read hides the meter rather than showing a
+      // number nobody should trust.
+      .then(paintQuota)
+      .catch(() => {});
+  }
+
+  refreshQuota();
+  setInterval(refreshQuota, 60000);
+
   fetch('/api/suggestions')
     .then((r) => r.json())
     .then(({ niches, locations, signals, thresholds, minQueryLength, budget }) => {
@@ -805,6 +899,10 @@
       if (budget) {
         if (budget.maxResults) DEFAULT_LIMIT = budget.maxResults;
         if (budget.maxCalls) CALL_BACKSTOP = budget.maxCalls;
+        if (typeof budget.maxDepth === 'number') {
+          DEFAULT_DEPTH = budget.maxDepth;
+          depthInput.placeholder = String(DEFAULT_DEPTH);
+        }
         limitInput.placeholder = String(DEFAULT_LIMIT);
         renderSizing();
       }
@@ -869,7 +967,7 @@
      .env has changed. These are only the values used before that lands. */
   let DEFAULT_LIMIT = 100;
   let CALL_BACKSTOP = 90;
-  const DEFAULT_DEPTH = 2;
+  let DEFAULT_DEPTH = 1;
 
   /* A blank box means "use the default" — resolved here and nowhere else.
      The hint under the form and the search itself both read these, so the
@@ -1016,6 +1114,9 @@
     });
 
     stream.addEventListener('done', (ev) => {
+      // The sweep just moved the ledger; show the new figure rather than
+      // waiting up to a minute for the timer.
+      refreshQuota();
       const result = JSON.parse(ev.data);
       leads = result.leads;
       run = result.run;
