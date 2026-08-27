@@ -1314,6 +1314,10 @@
   function totalsOf(rows) {
     const by = (id) => rows.filter(FILTERS.find((f) => f.id === id).test).length;
     return {
+      // The server sends this one with a real search; totalsOf rebuilds the
+      // same shape for rows read back from the Sheet, and used to omit it -
+      // so renderStats printed fmt(undefined), which is the string "NaN".
+      prospects: rows.length,
       withEmail: by('has-email'),
       noSite: by('no-site'),
       down: by('down'),
