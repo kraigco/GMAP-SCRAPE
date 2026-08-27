@@ -343,6 +343,42 @@
   thead th.sortable { cursor: pointer; user-select: none; }
   thead th.sortable:hover { color: var(--text); }
   thead th .dir { margin-left: 4px; color: var(--brand); }
+  /* Every sortable column carries a marker, not just the active one. Rating and
+     Collected have always been sortable; with a caret on Reviews alone they
+     read as plain headings, so nobody tried them. */
+  thead th .dir.off { color: var(--text-faint); opacity: .5; font-size: 11px; }
+  thead th.sortable:hover .dir.off { opacity: 1; color: var(--text-dim); }
+
+  /* Additional addresses found on the same site. The trigger has to look
+     hoverable — it was flat text that happened to have a tooltip nobody saw. */
+  .alts {
+    display: inline-block; margin-top: 2px;
+    font-size: 11.5px; font-weight: 400; color: var(--text-faint);
+    border-bottom: 1px dashed var(--text-faint); cursor: help;
+  }
+  .alts:hover, .alts:focus-visible { color: var(--brand-text); border-bottom-color: var(--brand); }
+  .alts:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+  /* .table-scroll is overflow:auto on BOTH axes, so a popover positioned inside
+     a row is clipped by the scroller. This one is position:fixed and lives on
+     <body>, moved to the trigger — the only way it escapes the clip. */
+  .email-pop {
+    position: fixed; z-index: 60;
+    display: flex; flex-direction: column; gap: 1px;
+    min-width: 190px; max-width: 320px; padding: 7px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 9px; box-shadow: 0 10px 26px rgba(0, 0, 0, .35);
+  }
+  .email-pop[hidden] { display: none; }
+  .email-pop .head {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--text-faint); padding: 2px 6px 5px;
+  }
+  .email-pop a {
+    color: var(--info-text); text-decoration: none; font-size: 12.5px;
+    padding: 5px 6px; border-radius: 6px; word-break: break-all;
+  }
+  .email-pop a:hover { background: var(--row-hover); color: var(--brand-text); }
   th.pick, td.pick { width: 40px; padding-right: 0; }
   tbody td { padding: 11px 16px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
   tbody tr:last-child td { border-bottom: 0; }
@@ -1511,12 +1547,13 @@
     document.querySelectorAll('thead th.sortable').forEach((th) => {
       const old = th.querySelector('.dir');
       if (old) old.remove();
-      if (th.dataset.sort === sortKey) {
-        const s = document.createElement('span');
-        s.className = 'dir';
-        s.textContent = sortDir === -1 ? '▾' : '▴';
-        th.appendChild(s);
-      }
+      const active = th.dataset.sort === sortKey;
+      const s = document.createElement('span');
+      // The inactive marker is what tells you the column can be sorted at all.
+      s.className = active ? 'dir' : 'dir off';
+      s.textContent = active ? (sortDir === -1 ? '▾' : '▴') : '⇅';
+      th.appendChild(s);
+      th.setAttribute('aria-sort', active ? (sortDir === -1 ? 'descending' : 'ascending') : 'none');
     });
 
     const allPicked = visible.length > 0 && visible.every((l) => selected.has(l.id));
@@ -1537,7 +1574,13 @@
 
       const email = l.email
         ? '<a class="email" href="mailto:' + esc(l.email) + '">' + esc(l.email) + '</a>' +
-          (l.emailAlt.length ? '<span class="sub">+' + l.emailAlt.length + ' more</span>' : '')
+          (l.emailAlt.length
+            ? '<br><span class="alts" tabindex="0" role="button"' +
+              ' aria-label="Show ' + l.emailAlt.length + ' more address' +
+              (l.emailAlt.length === 1 ? '' : 'es') + ' for this business"' +
+              ' data-emails="' + esc(JSON.stringify(l.emailAlt)) + '">+' +
+              l.emailAlt.length + ' more</span>'
+            : '')
         : '<span class="none">not found</span>';
 
       const contact = (l.phone ? '<span class="mono">' + esc(l.phone) + '</span>' : '<span class="none">no phone</span>') +
@@ -1663,6 +1706,76 @@
       resetPage();
       renderTable();
     });
+  });
+
+  /* ------------------------------------------------------- alt addresses -- */
+
+  /* A site often lists more than one address and the audit keeps them all. The
+     extras were rendered as the flat text "+2 more", which said a thing existed
+     without ever showing it. */
+  const altPop = document.createElement('div');
+  altPop.className = 'email-pop';
+  altPop.hidden = true;
+  document.body.appendChild(altPop);
+
+  let altTimer;
+  let altOwner = null;
+
+  function showAlts(trigger) {
+    clearTimeout(altTimer);
+    let list;
+    try { list = JSON.parse(trigger.dataset.emails || '[]'); } catch { return; }
+    if (!list.length) return;
+    altOwner = trigger;
+
+    altPop.innerHTML = '<span class="head">Also found on this site</span>' +
+      list.map((e) => '<a href="mailto:' + esc(e) + '">' + esc(e) + '</a>').join('');
+    altPop.hidden = false;
+
+    // Measure only after it is rendered, or the offsets are all zero.
+    const r = trigger.getBoundingClientRect();
+    const w = altPop.offsetWidth;
+    const h = altPop.offsetHeight;
+    const left = Math.max(12, Math.min(r.left, window.innerWidth - w - 12));
+    // Flip above when there is no room below, so the last row works too.
+    const top = r.bottom + 6 + h > window.innerHeight - 12 ? r.top - h - 6 : r.bottom + 6;
+    altPop.style.left = left + 'px';
+    altPop.style.top = Math.max(12, top) + 'px';
+  }
+
+  function hideAlts() {
+    // A grace period, so moving the pointer from the trigger onto the card
+    // does not close the thing you are reaching for.
+    clearTimeout(altTimer);
+    altTimer = setTimeout(() => { altPop.hidden = true; altOwner = null; }, 140);
+  }
+
+  const rowsEl = document.getElementById('rows');
+  rowsEl.addEventListener('mouseover', (e) => {
+    const t = e.target.closest('.alts');
+    if (t) showAlts(t);
+  });
+  rowsEl.addEventListener('mouseout', (e) => {
+    if (e.target.closest('.alts')) hideAlts();
+  });
+  rowsEl.addEventListener('focusin', (e) => {
+    const t = e.target.closest('.alts');
+    if (t) showAlts(t);
+  });
+  rowsEl.addEventListener('focusout', (e) => {
+    if (e.target.closest('.alts')) hideAlts();
+  });
+  altPop.addEventListener('mouseenter', () => clearTimeout(altTimer));
+  altPop.addEventListener('mouseleave', hideAlts);
+
+  /* position:fixed does not travel with the scroller, so a card left open
+     while the table scrolls would sit over an unrelated row. */
+  document.querySelector('.table-scroll').addEventListener('scroll', () => {
+    if (!altPop.hidden) { altPop.hidden = true; altOwner = null; }
+  }, { passive: true });
+  window.addEventListener('resize', () => { if (altOwner) showAlts(altOwner); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !altPop.hidden) { altPop.hidden = true; altOwner = null; }
   });
 
   let toastTimer;
