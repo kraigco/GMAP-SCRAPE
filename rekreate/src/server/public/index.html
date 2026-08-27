@@ -699,6 +699,7 @@
               <th>Signals</th>
               <th class="sortable num" data-sort="rating">Rating</th>
               <th class="sortable num" data-sort="reviews">Reviews</th>
+              <th class="sortable" data-sort="collected">Collected</th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -740,8 +741,13 @@
   const TICK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
   const WARN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.9 18.1A2 2 0 0 0 3.6 21h16.8a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>';
 
-  /* Live state — empty until the first search returns. */
+  /* Live state — filled from the sheet on load, replaced by a search. */
   let leads = [];
+  /* Whether what is on screen came from the sheet rather than a fresh sweep.
+     The two differ in one way that matters: sheet rows carry a collected date
+     and a search's rows do not, because they were collected just now. */
+  let fromSheet = false;
+  let sheetTotal = 0;
   let run = null;
   let totals = {};
   let filtered = null;
@@ -870,6 +876,7 @@
   }
 
   refreshQuota();
+  loadStoredLeads();
   setInterval(refreshQuota, 60000);
 
   fetch('/api/suggestions')
@@ -1287,6 +1294,12 @@
       .slice()
       .sort((a, b) => {
         if (sortKey === 'name') return a.name.localeCompare(b.name) * sortDir;
+        // ISO timestamps sort correctly as strings, and an empty one is a row
+        // collected by the search on screen — newest there is, so it leads.
+        if (sortKey === 'collected') {
+          const ac = a.collectedAt || '9999', bc = b.collectedAt || '9999';
+          return ac < bc ? -sortDir : ac > bc ? sortDir : 0;
+        }
         const av = a[sortKey], bv = b[sortKey];
         if (av === null && bv === null) return 0;
         if (av === null) return 1;              // missing data always sinks
@@ -1311,12 +1324,59 @@
     document.getElementById('export').disabled = leads.length === 0;
   }
 
+  /**
+   * When a prospect was first collected.
+   *
+   * Only rows read back from the sheet carry a date — a lead still on screen
+   * from the sweep that just found it was collected now, and saying so is more
+   * honest than printing today's date as though it had been looked up.
+   */
+  function collectedCell(l) {
+    if (!l.collectedAt) return '<span class="none">this search</span>';
+    const d = new Date(l.collectedAt);
+    if (Number.isNaN(d.getTime())) return '<span class="none">—</span>';
+    // ago() already exists for the recent-searches list; one relative-time
+    // format across the page beats two that round differently.
+    return '<span class="mono">' + esc(d.toLocaleDateString([], { day: '2-digit', month: 'short' })) +
+      '</span><span class="sub">' + esc(ago(l.collectedAt)) + '</span>';
+  }
+
+  /**
+   * Fill the table from the sheet on load.
+   *
+   * The table used to sit empty behind the form until someone ran a search,
+   * which hid every prospect already collected. A live search replaces this;
+   * nothing here overwrites results that are already on screen.
+   */
+  function loadStoredLeads() {
+    if (leads.length) return;
+    fetch('/api/leads?limit=500')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => {
+        if (!body || leads.length) return;
+        if (!body.ok) {
+          // Say why rather than showing an empty table that looks like "none".
+          const label = document.getElementById('count-label');
+          if (label && body.error) label.textContent = 'Sheet unavailable — ' + body.error;
+          return;
+        }
+        if (!body.leads.length) return;
+        leads = body.leads;
+        fromSheet = true;
+        sheetTotal = body.total;
+        page = 0;
+        renderChips();
+        renderTable();
+      })
+      .catch(() => {});
+  }
+
   function renderTable() {
     const body = document.getElementById('rows');
     const label = document.getElementById('count-label');
 
     if (!leads.length) {
-      body.innerHTML = '<tr><td colspan="9"><div class="idle">' +
+      body.innerHTML = '<tr><td colspan="10"><div class="idle">' +
         '<b>No search yet</b><p>Enter a location and a niche above, then hit Search. ' +
         'The sweep tiles the area, splits anything that hits Google’s 60-result ceiling, ' +
         'and visits every site it finds for a contact address.</p></div></td></tr>';
@@ -1362,7 +1422,7 @@
     pickAll.indeterminate = !allPicked && visible.some((l) => selected.has(l.id));
 
     if (!visible.length) {
-      body.innerHTML = '<tr><td colspan="9" class="empty">No prospects match that filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" class="empty">No prospects match that filter.</td></tr>';
       renderBulk();
       return;
     }
@@ -1393,6 +1453,7 @@
         '<td><div class="flags">' + flags + '</div></td>' +
         '<td class="mono num">' + (l.rating !== null ? l.rating.toFixed(1) : '<span class="none">—</span>') + '</td>' +
         '<td class="mono num">' + (l.reviews !== null ? fmt(l.reviews) : '<span class="none">—</span>') + '</td>' +
+        '<td class="collected">' + collectedCell(l) + '</td>' +
       '</tr>';
     }).join('');
 

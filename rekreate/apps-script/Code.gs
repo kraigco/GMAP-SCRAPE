@@ -142,6 +142,13 @@ function doGet(e) {
   // permissions problem for what is actually a configuration one.
   try {
     const sheet = book().getSheetByName(LEADS_TAB);
+
+    // ?action=leads reads the sheet back out, so the dashboard can show what
+    // has been collected instead of an empty table until someone searches.
+    if (e && e.parameter && e.parameter.action === 'leads') {
+      return json(readLeads(sheet, e.parameter));
+    }
+
     return json({
       ok: true,
       service: 'rekreate-ingest',
@@ -160,6 +167,49 @@ function doGet(e) {
       error: String(err && err.message ? err.message : err),
     });
   }
+}
+
+
+/**
+ * Read the Leads tab back out, newest first.
+ *
+ * Returns rows as plain arrays alongside the header, rather than objects. The
+ * caller maps them by column NAME, so inserting a column here cannot silently
+ * shift a field into the wrong place on the dashboard — the failure would be a
+ * missing column rather than a phone number rendered as a rating.
+ *
+ * Paged because a whole sheet is not something to move in one response, and
+ * capped because a runaway `limit` should be the server's problem, not the
+ * spreadsheet's.
+ */
+function readLeads(sheet, params) {
+  if (!sheet) return { ok: true, columns: COLUMNS, rows: [], total: 0 };
+
+  const total = Math.max(0, sheet.getLastRow() - 1);
+  if (total === 0) return { ok: true, columns: COLUMNS, rows: [], total: 0 };
+
+  const width = Math.max(sheet.getLastColumn(), COLUMNS.length);
+  const limit = Math.max(1, Math.min(1000, Number(params.limit) || 500));
+  const offset = Math.max(0, Math.min(total, Number(params.offset) || 0));
+
+  // Newest first: the sheet appends, so the last rows are the recent ones and
+  // those are what anyone opening the dashboard wants to see.
+  const take = Math.min(limit, total - offset);
+  if (take <= 0) return { ok: true, columns: COLUMNS, rows: [], total: total };
+  const startRow = total - offset - take + 2; // +1 header, +1 to 1-based
+
+  const values = sheet.getRange(startRow, 1, take, width).getValues();
+  values.reverse();
+
+  // Dates arrive as Date objects and JSON.stringify would render them in the
+  // script's timezone. ISO keeps them unambiguous for whoever reads them.
+  const rows = values.map(function (row) {
+    return row.map(function (cell) {
+      return cell instanceof Date ? cell.toISOString() : cell;
+    });
+  });
+
+  return { ok: true, columns: COLUMNS, rows: rows, total: total, offset: offset };
 }
 
 /* -------------------------------------------------------------------- write */

@@ -11,7 +11,7 @@ import { LOCATION_SEEDS, NICHE_SUGGESTIONS } from '../config/niche-suggestions.t
 import { leadToEnrichedRow, parseEnrichedCsv, renderEnrichedCsv } from '../export/csv.ts';
 import { parseSearchBaseName, searchBaseName, writeUnique } from '../export/search-file.ts';
 import { SIGNAL_LABELS, SLOW_TTFB_MS, summarise, THIN_REVIEW_COUNT } from '../lead/signals.ts';
-import { describeResult, isConfigured, pushLeads, toSheetLead } from '../export/sheets.ts';
+import { describeResult, fetchStoredLeads, isConfigured, pushLeads, toSheetLead } from '../export/sheets.ts';
 import { peek } from '../places/usage.ts';
 import { TILE_CACHE_PATH } from '../places/tile-cache.ts';
 import { writeFile, mkdir } from 'node:fs/promises';
@@ -410,6 +410,35 @@ const server = createServer((req, res) => {
   // What the free allowance looks like right now, read straight from the same
   // ledger a sweep reserves against — not a second copy of the arithmetic. A
   // budget you cannot see before you spend it is one you find out about after.
+  // What is already in the sheet. The table used to sit empty until someone
+  // searched, which hid 326 collected prospects behind a form.
+  if (url.pathname === '/api/leads') {
+    const limit = Number(url.searchParams.get('limit')) || 500;
+    const offset = Number(url.searchParams.get('offset')) || 0;
+    fetchStoredLeads(
+      { url: env.SHEETS_WEBAPP_URL ?? '', token: env.SHEETS_INGEST_TOKEN ?? '' },
+      { limit, offset },
+    )
+      .then((result) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        // Always 200: fetchStoredLeads never throws, and the page needs to tell
+        // "nothing collected yet" apart from "could not reach the sheet".
+        res.end(JSON.stringify(result));
+      })
+      .catch((err: unknown) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            leads: [],
+            total: 0,
+            error: err instanceof Error ? err.message : 'unreadable',
+          }),
+        );
+      });
+    return;
+  }
+
   if (url.pathname === '/api/quota') {
     // The request handler is not async, so this follows the same then/catch
     // shape the other asynchronous routes use.

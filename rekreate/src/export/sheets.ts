@@ -274,3 +274,154 @@ export function describeResult(result: IngestResult): string {
   if (result.total !== null) parts.push(`${result.total} in the sheet`);
   return parts.join(', ');
 }
+
+/** One lead as it comes back from the sheet, plus when it was first collected. */
+export type StoredLead = Lead & {
+  /** ISO date this prospect was first seen by any scrape, or '' if unrecorded. */
+  collectedAt: string;
+  /** ISO date the scraper last refreshed it. */
+  lastSeen: string;
+  reviewStatus: string;
+  notes: string;
+  hook: string;
+  hookBasis: string;
+};
+
+export type StoredLeadsResult = {
+  ok: boolean;
+  leads: StoredLead[];
+  /** Rows in the sheet, which may exceed the page returned. */
+  total: number;
+  error: string | null;
+};
+
+/**
+ * Map one sheet row onto a lead, BY COLUMN NAME.
+ *
+ * Positional mapping is the obvious version and the wrong one: a column
+ * inserted in the middle of the sheet would quietly shift every later field one
+ * place, and the symptom is a phone number rendered as a rating rather than an
+ * error anyone would notice. Reading the header the sheet actually sent means a
+ * renamed or missing column produces an empty field, which is visible.
+ */
+export function rowToStoredLead(columns: string[], row: unknown[]): StoredLead | null {
+  const at = (name: string): string => {
+    const i = columns.indexOf(name);
+    const v = i === -1 ? '' : row[i];
+    return v === null || v === undefined ? '' : String(v);
+  };
+  const num = (name: string): number | null => {
+    const raw = at(name);
+    if (raw === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const id = at('place_id');
+  // A row with no key is not a lead. Rendering it would put a blank line in the
+  // table that no selection or push could ever address.
+  if (!id) return null;
+
+  const website = at('website');
+  const emailAlt = at('email_alt').split(/\s+/).filter(Boolean);
+
+  return {
+    id,
+    name: at('name'),
+    address: at('address'),
+    phone: at('phone'),
+    website,
+    host: website ? website.replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '',
+    email: at('email'),
+    emailAlt,
+    rating: num('rating'),
+    reviews: num('reviews'),
+    businessStatus: at('business_status'),
+    primaryType: at('primary_type'),
+    lat: num('latitude'),
+    lng: num('longitude'),
+    reachable: at('reachable'),
+    https: at('https'),
+    ttfb: num('ttfb_ms'),
+    viewport: at('mobile_viewport'),
+    contactForm: at('contact_form'),
+    finalUrl: at('final_url'),
+    auditError: at('audit_error'),
+    signals: at('signals').split(/\s+/).filter(Boolean) as Lead['signals'],
+    // 'reachable' is only ever written by the audit, so its presence is the
+    // record that an audit happened. Defaulting this to true would let a
+    // never-audited row claim a clean bill of health it never earned.
+    audited: at('reachable') !== '',
+    collectedAt: at('first_listed'),
+    lastSeen: at('last_seen'),
+    reviewStatus: at('review_status'),
+    notes: at('notes'),
+    hook: at('hook'),
+    hookBasis: at('hook_basis'),
+  };
+}
+
+/**
+ * Read leads back out of the sheet.
+ *
+ * Never throws, for the same reason pushLeads does not: the dashboard showing
+ * an empty table is a worse outcome than it showing an error, but both are far
+ * better than the page failing to load at all.
+ */
+export async function fetchStoredLeads(
+  target: SheetsTarget,
+  opts: { limit?: number; offset?: number } = {},
+): Promise<StoredLeadsResult> {
+  const empty = (error: string | null): StoredLeadsResult => ({
+    ok: error === null,
+    leads: [],
+    total: 0,
+    error,
+  });
+
+  if (!isConfigured(target.url, target.token)) {
+    return empty('SHEETS_WEBAPP_URL and SHEETS_INGEST_TOKEN are not both set');
+  }
+
+  const doFetch = target.fetchImpl ?? fetch;
+  const qs = new URLSearchParams({
+    token: target.token,
+    action: 'leads',
+    limit: String(opts.limit ?? 500),
+    offset: String(opts.offset ?? 0),
+  });
+
+  try {
+    const res = await doFetch(`${target.url}?${qs}`, { redirect: 'follow' });
+    const text = await res.text();
+
+    // An Apps Script web app answers 200 to everything, and serves an HTML
+    // sign-in page transiently even when access is set to Anyone.
+    if (/^\s*<(!doctype|html)/i.test(text)) return empty(HTML_RESPONSE);
+
+    const body = JSON.parse(text) as {
+      ok?: boolean;
+      columns?: string[];
+      rows?: unknown[][];
+      total?: number;
+      error?: string;
+      authorised?: boolean;
+    };
+
+    if (body.authorised === false) return empty('the Web App rejected SHEETS_INGEST_TOKEN');
+    if (!body.ok) return empty(body.error ?? 'the Web App reported a failure with no reason');
+    if (!Array.isArray(body.columns) || !Array.isArray(body.rows)) {
+      // The deployed version predates ?action=leads — a redeploy, not a fault.
+      return empty('the deployed Web App does not serve leads yet — redeploy Code.gs');
+    }
+
+    const columns = body.columns;
+    const leads = body.rows
+      .map((row) => rowToStoredLead(columns, row))
+      .filter((l): l is StoredLead => l !== null);
+
+    return { ok: true, leads, total: body.total ?? leads.length, error: null };
+  } catch (err) {
+    return empty(err instanceof Error ? err.message : String(err));
+  }
+}
