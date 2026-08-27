@@ -34,18 +34,37 @@ export type Usage = {
   month: string;
   /** Calls reserved so far this month. */
   used: number;
+  /**
+   * Calendar day in US/Pacific, "YYYY-MM-DD" - Google's own reset boundary.
+   *
+   * Optional because a ledger written before the daily dimension existed really
+   * does lack it, and that file is not corrupt: its monthly count is still
+   * true. Absent reads as "today has not been recorded yet".
+   */
+  day?: string;
+  /** Calls reserved so far today. */
+  dayUsed?: number;
 };
 
 export type Reservation = {
-  /** Calls this run may spend. Zero means the month is gone. */
+  /** Calls this run may spend. Zero means an allowance is gone. */
   granted: number;
   /** Reserved so far this month, including this grant. */
   used: number;
-  /** Calls left after this grant. */
+  /** Calls left this month after this grant. */
   remaining: number;
   cap: number;
-  /** When the allowance resets, ISO. */
+  /** When the monthly allowance resets, ISO. */
   resetsAt: string;
+  /** Reserved so far today, including this grant. */
+  dayUsed: number;
+  /** Calls left today after this grant. */
+  dayRemaining: number;
+  dayCap: number;
+  /** Next midnight US/Pacific, ISO - when the daily allowance resets. */
+  dayResetsAt: string;
+  /** Which ceiling stopped this run: the day, the month, or neither. */
+  limitedBy: 'day' | 'month' | null;
 };
 
 /**
@@ -66,7 +85,53 @@ export function nextReset(now: Date): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
 }
 
-const EMPTY: Usage = { month: '', used: 0 };
+/**
+ * Google's DAILY quota resets at midnight US/Pacific, so the daily ledger has
+ * to be keyed on the Pacific calendar date and nothing else. A UTC date would
+ * roll over between 4pm and 5pm local, handing back a fresh allowance while
+ * Google still counted the old day - the exact direction that produces a bill.
+ *
+ * Intl is doing the DST work here on purpose: Pacific is UTC-8 or UTC-7
+ * depending on the date, and hard-coding either is wrong for half the year.
+ */
+export const PACIFIC_TZ = 'America/Los_Angeles';
+
+const PACIFIC_DATE = new Intl.DateTimeFormat('en-CA', {
+  timeZone: PACIFIC_TZ,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+/** "YYYY-MM-DD" as it reads in California right now. */
+export function dayKey(now: Date): string {
+  return PACIFIC_DATE.format(now);
+}
+
+/**
+ * The instant the Pacific date next changes.
+ *
+ * Found by bisection rather than by adding 24 hours: on the two DST days a
+ * Pacific day is 23 or 25 hours long, and arithmetic that assumes 24 lands an
+ * hour off exactly when it matters. Thirty halvings of a 26-hour window is
+ * millisecond-exact and costs nothing anyone can measure.
+ */
+export function nextDayReset(now: Date): Date {
+  const today = dayKey(now);
+  let lo = now.getTime();
+  let hi = lo + 26 * 60 * 60 * 1000;
+  for (let i = 0; i < 30; i += 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (dayKey(new Date(mid)) === today) lo = mid;
+    else hi = mid;
+  }
+  return new Date(hi);
+}
+
+/** Calls per Pacific day. 30 x 31 = 930, which stays under the 1,000/month cap. */
+export const FREE_CALLS_PER_DAY = 30;
+
+const EMPTY: Usage = { month: '', used: 0, day: '', dayUsed: 0 };
 
 /**
  * Grant what the month can still afford — pure, so the arithmetic is testable
@@ -82,11 +147,30 @@ export function grant(
   month: string,
   want: number,
   cap: number = ENTERPRISE_FREE_CALLS_PER_MONTH,
-): { next: Usage; granted: number } {
+  day: string = '',
+  dayCap: number = FREE_CALLS_PER_DAY,
+): { next: Usage; granted: number; limitedBy: 'day' | 'month' | null } {
   const used = current.month === month ? current.used : 0;
-  const remaining = Math.max(0, cap - used);
-  const granted = Math.max(0, Math.min(want, remaining));
-  return { next: { month, used: used + granted }, granted };
+  const dayUsed = current.day === day ? current.dayUsed ?? 0 : 0;
+
+  const monthLeft = Math.max(0, cap - used);
+  const dayLeft = Math.max(0, dayCap - dayUsed);
+
+  // BOTH ceilings bind, and the tighter one wins. The daily figure exists so a
+  // single enthusiastic afternoon cannot spend the month; the monthly figure is
+  // the one Google actually bills against. Neither alone is sufficient.
+  const granted = Math.max(0, Math.min(want, monthLeft, dayLeft));
+
+  // Only report a limit when it actually cost the caller something, so a run
+  // that got everything it asked for never claims to have been throttled.
+  const limitedBy =
+    granted >= want ? null : dayLeft <= monthLeft ? 'day' : 'month';
+
+  return {
+    next: { month, used: used + granted, day, dayUsed: dayUsed + granted },
+    granted,
+    limitedBy,
+  };
 }
 
 /**
@@ -96,17 +180,41 @@ export function grant(
  * reserved — a caller reporting a larger spend than its grant is a bug, and
  * quietly absorbing it would hide the overspend rather than record it.
  */
-export function settle(current: Usage, month: string, reserved: number, actual: number): Usage {
+export function settle(
+  current: Usage,
+  month: string,
+  reserved: number,
+  actual: number,
+  day: string = '',
+): Usage {
   if (current.month !== month) return current;
   const unused = Math.max(0, reserved - Math.max(0, actual));
-  return { month, used: Math.max(0, current.used - unused) };
+  return {
+    month,
+    used: Math.max(0, current.used - unused),
+    day: current.day ?? '',
+    // A day that has since rolled over keeps its own count: crediting today's
+    // ledger for calls spent yesterday would hand back an allowance twice.
+    dayUsed:
+      current.day === day
+        ? Math.max(0, (current.dayUsed ?? 0) - unused)
+        : current.dayUsed ?? 0,
+  };
 }
 
 async function read(path: string): Promise<Usage> {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as Partial<Usage>;
     if (typeof parsed.month === 'string' && typeof parsed.used === 'number' && parsed.used >= 0) {
-      return { month: parsed.month, used: parsed.used };
+      return {
+        month: parsed.month,
+        used: parsed.used,
+        // A ledger written before the daily dimension existed has no day. It
+        // reads as a fresh day rather than a corrupt file - the month's count
+        // is still true, and today simply has not been recorded yet.
+        day: typeof parsed.day === 'string' ? parsed.day : '',
+        dayUsed: typeof parsed.dayUsed === 'number' && parsed.dayUsed >= 0 ? parsed.dayUsed : 0,
+      };
     }
     return EMPTY;
   } catch {
@@ -125,14 +233,16 @@ async function write(path: string, usage: Usage): Promise<void> {
 /** Claim up to `want` calls for this run, writing the reservation before it is spent. */
 export async function reserve(
   want: number,
-  opts: { path?: string; now?: Date; cap?: number } = {},
+  opts: { path?: string; now?: Date; cap?: number; dayCap?: number } = {},
 ): Promise<Reservation> {
   const path = opts.path ?? USAGE_PATH;
   const now = opts.now ?? new Date();
   const cap = opts.cap ?? ENTERPRISE_FREE_CALLS_PER_MONTH;
+  const dayCap = opts.dayCap ?? FREE_CALLS_PER_DAY;
   const month = monthKey(now);
+  const day = dayKey(now);
 
-  const { next, granted } = grant(await read(path), month, want, cap);
+  const { next, granted, limitedBy } = grant(await read(path), month, want, cap, day, dayCap);
   await write(path, next);
 
   return {
@@ -141,6 +251,11 @@ export async function reserve(
     remaining: Math.max(0, cap - next.used),
     cap,
     resetsAt: nextReset(now).toISOString(),
+    dayUsed: next.dayUsed ?? 0,
+    dayRemaining: Math.max(0, dayCap - (next.dayUsed ?? 0)),
+    dayCap,
+    dayResetsAt: nextDayReset(now).toISOString(),
+    limitedBy,
   };
 }
 
@@ -152,22 +267,29 @@ export async function release(
 ): Promise<void> {
   const path = opts.path ?? USAGE_PATH;
   const now = opts.now ?? new Date();
-  await write(path, settle(await read(path), monthKey(now), reserved, actual));
+  await write(path, settle(await read(path), monthKey(now), reserved, actual, dayKey(now)));
 }
 
 /** What the month looks like right now, without claiming anything. */
 export async function peek(
-  opts: { path?: string; now?: Date; cap?: number } = {},
+  opts: { path?: string; now?: Date; cap?: number; dayCap?: number } = {},
 ): Promise<Reservation> {
   const now = opts.now ?? new Date();
   const cap = opts.cap ?? ENTERPRISE_FREE_CALLS_PER_MONTH;
+  const dayCap = opts.dayCap ?? FREE_CALLS_PER_DAY;
   const stored = await read(opts.path ?? USAGE_PATH);
   const used = stored.month === monthKey(now) ? stored.used : 0;
+  const dayUsed = stored.day === dayKey(now) ? stored.dayUsed ?? 0 : 0;
   return {
     granted: 0,
     used,
     remaining: Math.max(0, cap - used),
     cap,
     resetsAt: nextReset(now).toISOString(),
+    dayUsed,
+    dayRemaining: Math.max(0, dayCap - dayUsed),
+    dayCap,
+    dayResetsAt: nextDayReset(now).toISOString(),
+    limitedBy: null,
   };
 }

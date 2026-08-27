@@ -6,6 +6,7 @@ import { createPlacesClient } from '../places/client.ts';
 import { dedupeById } from '../places/dedupe.ts';
 import { estimateCostUsd, ENTERPRISE_FREE_CALLS_PER_MONTH } from '../places/field-mask.ts';
 import { release, reserve } from '../places/usage.ts';
+import { cachingSweep, load as loadTileCache, TILE_CACHE_PATH } from '../places/tile-cache.ts';
 import { sweepTiles } from '../places/tiling.ts';
 import type { RawPlace, RejectedPlace } from '../places/schema.ts';
 import { parseCsv, writeCsv, writeEnrichedCsv, LEAD_COLUMNS } from '../export/csv.ts';
@@ -84,7 +85,7 @@ program
     // A per-run cap cannot make this guarantee alone: thirty runs of forty-five
     // is 1,350 against an allowance of 1,000. Only a figure that outlives the
     // process can.
-    const budget = await reserve(maxCalls);
+    const budget = await reserve(maxCalls, { dayCap: env.PLACES_DAILY_LIMIT });
     if (budget.granted === 0) {
       console.log('\nNo free Places calls left this month.');
       console.log(`  used       ${budget.used} of ${budget.cap}`);
@@ -148,6 +149,9 @@ program
     // decides WHEN to halt; dedupeById below stays the authority on the result.
     const seen = new Set<string>();
     let resultCapReached = false;
+    // Tiles already paid for inside the TTL replay from disk, so a sweep cut
+    // short by the daily budget resumes here tomorrow instead of restarting.
+    const cache = cachingSweep(await loadTileCache(TILE_CACHE_PATH), { path: TILE_CACHE_PATH });
 
     for (const keyword of keywords) {
       if (client.budgetExhausted()) {
@@ -163,14 +167,17 @@ program
 
       const sweep = await sweepTiles<RawPlace>(
         bbox,
-        async (bbox) => {
+        cache.fetcher(keyword, async (bbox) => {
           const tile = await client.searchTile(keyword, bbox);
           rejected.push(...tile.rejected);
-          for (const place of tile.places) seen.add(place.id);
           return { items: tile.places, truncated: tile.truncated };
-        },
+        }),
         { maxDepth, shouldHalt: () => client.budgetExhausted() || seen.size >= maxResults },
       );
+
+      // Counted here rather than in the fetcher so replayed tiles feed the
+      // result cap exactly as freshly-fetched ones do.
+      for (const found of sweep.items) seen.add(found.id);
 
       batches.push(sweep.items);
       tilesSearched += sweep.tilesSearched;
@@ -210,6 +217,7 @@ program
     // the full reservation, which is the right way round: an interrupted run
     // forfeits its unused budget rather than risking a bill.
     await release(granted, callsUsed + geocodeCalls);
+    await cache.flush();
 
     if (!dryRun && unique.length > 0) {
       await writeCsv(String(opts['out']), unique, new Date().toISOString());
@@ -222,6 +230,9 @@ program
     console.log(`  with a phone       ${withPhone}`);
     console.log(`  tiles searched     ${tilesSearched} (${tilesSplit} split, deepest ${maxDepthHit})`);
     console.log(`  calls used         ${callsUsed} of ${maxCalls}`);
+    if (cache.hits() > 0) {
+      console.log(`  from cache         ${cache.hits()} tile(s) replayed free — resumed, not re-paid`);
+    }
     if (resultCapReached) {
       console.log(`  PARTIAL            stopped at the ${maxResults}-business limit — the market holds more.`);
       console.log('                     Raise --max-results to cover the rest.');

@@ -4,6 +4,7 @@ import { createPlacesClient } from '../places/client.ts';
 import { dedupeById } from '../places/dedupe.ts';
 import { estimateCostUsd } from '../places/field-mask.ts';
 import { release, reserve } from '../places/usage.ts';
+import { cachingSweep, load as loadTileCache, noCache } from '../places/tile-cache.ts';
 import { resolveLocation, termsForNiche } from '../places/geocode.ts';
 import { resolveNiche } from '../config/niches/property-management.ts';
 import type { RawPlace } from '../places/schema.ts';
@@ -82,6 +83,8 @@ export type SearchResult = {
     maxResults: number;
     /** The sweep stopped because it had collected `maxResults` businesses. */
     resultCapReached: boolean;
+    /** Tiles replayed from the cache - calls this run did not have to spend. */
+    tilesFromCache: number;
     maxDepth: number;
     callsUsed: number;
     tilesSearched: number;
@@ -109,7 +112,19 @@ export type SearchResult = {
  * suite that writes to the live one spends next month's allowance on assertions
  * — which it did, 27 calls' worth, before this was injectable.
  */
-export type SearchDeps = { apiKey: string; fetchImpl?: typeof fetch; usagePath?: string };
+export type SearchDeps = {
+  apiKey: string;
+  fetchImpl?: typeof fetch;
+  usagePath?: string;
+  /** Overridden by tests so the suite never touches the real tile cache. */
+  tileCachePath?: string;
+  /**
+   * Places calls allowed per US/Pacific day. Passed in rather than read from
+   * env here, because this module deliberately knows nothing about process
+   * configuration - the server and the CLI each supply their own.
+   */
+  dailyCap?: number;
+};
 
 export async function runSearch(
   params: SearchParams,
@@ -124,9 +139,15 @@ export async function runSearch(
   // 45, matching env.MAX_CALLS: the monthly Enterprise free tier is 1,000
   // calls, which is ~45 a working day. The daily console cap is a separate,
   // looser wall — the monthly one is what decides whether a bill arrives.
-  const maxCalls = Math.max(1, Math.min(1000, params.maxCalls ?? 45));
+  // 25, matching env.MAX_CALLS. The per-run ceiling is the small guard; the
+  // daily and monthly ledgers are what keep the project free, because only
+  // they can see the runs this one knows nothing about.
+  const maxCalls = Math.max(1, Math.min(1000, params.maxCalls ?? 25));
   const maxResults = Math.max(1, Math.min(5000, params.maxResults ?? 100));
-  const maxDepth = Math.max(0, Math.min(5, params.maxDepth ?? 3));
+  // 1, matching env.MAX_TILE_DEPTH. This default said 3 while env.ts said 4
+  // and the dashboard said 2 - one setting with three values depending on
+  // which door you came through.
+  const maxDepth = Math.max(0, Math.min(5, params.maxDepth ?? 1));
   const doAudit = params.audit !== false;
   const concurrency = params.concurrency ?? 8;
 
@@ -159,7 +180,10 @@ export async function runSearch(
   //
   // A per-run ceiling cannot make this guarantee by itself; only a figure that
   // survives between runs can.
-  const ledger = deps.usagePath ? { path: deps.usagePath } : {};
+  const ledger = {
+    ...(deps.usagePath ? { path: deps.usagePath } : {}),
+    ...(deps.dailyCap === undefined ? {} : { dayCap: deps.dailyCap }),
+  };
   const budget = await reserve(maxCalls, ledger);
   if (budget.granted === 0) {
     throw new Error(
@@ -181,6 +205,13 @@ export async function runSearch(
     shouldStop: stopped,
     ...net,
   });
+  // Tiles already paid for within the TTL replay from disk. This is what makes
+  // a sweep resumable: a run stopped by the daily budget leaves its finished
+  // tiles here, and tomorrow's run walks the same tree spending nothing on them.
+  const cache = deps.tileCachePath
+    ? cachingSweep(await loadTileCache(deps.tileCachePath), { path: deps.tileCachePath })
+    : noCache();
+
   const batches: RawPlace[][] = [];
   let tilesSearched = 0;
   let tilesSplit = 0;
@@ -211,13 +242,17 @@ export async function runSearch(
 
     const sweep = await sweepTiles<RawPlace>(
       place.bbox,
-      async (bbox) => {
+      cache.fetcher(term, async (bbox) => {
         const tile = await client.searchTile(term, bbox);
-        for (const place of tile.places) seen.add(place.id);
         return { items: tile.places, truncated: tile.truncated };
-      },
+      }),
       { maxDepth, shouldHalt: () => client.budgetExhausted() || stopped() || seen.size >= maxResults },
     );
+
+    // Counted here rather than inside the fetcher so cached tiles feed the cap
+    // exactly as paid ones do. A resumed sweep that ignored its own replayed
+    // results would keep collecting past the limit it was given.
+    for (const found of sweep.items) seen.add(found.id);
 
     batches.push(sweep.items);
     tilesSearched += sweep.tilesSearched;
@@ -288,6 +323,10 @@ export async function runSearch(
   // than risking a bill.
   await release(budget.granted, callsUsed + geocodeCalls, ledger);
 
+  // Written after the settle so a crash between the two forfeits budget rather
+  // than banking tiles it may not have finished paying for.
+  await cache.flush();
+
   report('done', `${leads.length} prospects found.`, callsUsed, leads.length, 100);
 
   return {
@@ -299,6 +338,7 @@ export async function runSearch(
       maxCalls,
       maxResults,
       resultCapReached,
+      tilesFromCache: cache.hits(),
       maxDepth,
       callsUsed,
       tilesSearched,

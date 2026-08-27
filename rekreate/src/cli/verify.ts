@@ -6,6 +6,7 @@
  */
 import { existsSync } from 'node:fs';
 import { getAccessToken, loadServiceAccount, SHEETS_SCOPE } from '../export/google-auth.ts';
+import { PROBE_FIELD_MASK } from '../places/field-mask.ts';
 
 const PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
 const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
@@ -53,7 +54,10 @@ if (!mapsKey) {
     headers: {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': mapsKey,
-      'X-Goog-FieldMask': 'places.id,places.displayName',
+      // Named, not inline: every field mask in this project lives in
+      // field-mask.ts, because a mask written at its call site is a price
+      // change nobody reviews. This one is Essentials-tier on purpose.
+      'X-Goog-FieldMask': PROBE_FIELD_MASK,
     },
     body: JSON.stringify({
       textQuery: 'property management company',

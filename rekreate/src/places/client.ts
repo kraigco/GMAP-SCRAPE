@@ -139,7 +139,10 @@ export function createPlacesClient(opts: PlacesClientOptions): PlacesClient {
         );
       }
 
-      await sleep(500 * 2 ** attempt);
+      // 1s, 2s, 4s. A per-minute Places limit refills within the minute, so
+      // three waits totalling seven seconds clear it; anything surviving all
+      // three is reported rather than retried into the ground.
+      await sleep(1000 * 2 ** attempt);
     }
     return null;
   }

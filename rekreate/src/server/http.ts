@@ -13,6 +13,7 @@ import { parseSearchBaseName, searchBaseName, writeUnique } from '../export/sear
 import { SIGNAL_LABELS, SLOW_TTFB_MS, summarise, THIN_REVIEW_COUNT } from '../lead/signals.ts';
 import { describeResult, isConfigured, pushLeads, toSheetLead } from '../export/sheets.ts';
 import { peek } from '../places/usage.ts';
+import { TILE_CACHE_PATH } from '../places/tile-cache.ts';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { EnrichedRow } from '../export/csv.ts';
 import type { IngestResult } from '../export/sheets.ts';
@@ -147,7 +148,13 @@ async function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL)
         signal: control.signal,
         ...(maxTerms === undefined ? {} : { maxTerms }),
       },
-      { apiKey: env.GOOGLE_MAPS_API_KEY, dailyCap: env.PLACES_DAILY_LIMIT },
+      {
+        apiKey: env.GOOGLE_MAPS_API_KEY,
+        dailyCap: env.PLACES_DAILY_LIMIT,
+        // Naming the file is what turns the cache on. A sweep halted by the
+        // daily budget leaves its finished tiles here and resumes tomorrow.
+        tileCachePath: TILE_CACHE_PATH,
+      },
       (p) => { if (!aborted) sseSend(res, 'progress', p); },
     );
 
@@ -296,6 +303,7 @@ async function readSearch(file: string): Promise<unknown> {
       maxCalls: 0,
       maxResults: 0,
       resultCapReached: false,
+      tilesFromCache: 0,
       maxDepth: 0,
       halted: false,
       aborted: false,

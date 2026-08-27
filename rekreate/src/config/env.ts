@@ -27,10 +27,23 @@ const envSchema = z.object({
   // one free sweep per working day. At 90 a single run spends a tenth of the
   // month. Raise it only against a month with room left in it, not against
   // the daily cap - the daily cap is not what gets charged.
-  MAX_CALLS: numeric(45),
+  // 25 per sweep against a 30-call day: one run cannot eat the day, and two
+  // still fit. This is the per-RUN ceiling only. PLACES_DAILY_LIMIT is what
+  // actually protects the bill, because it is the one that survives a restart.
+  MAX_CALLS: numeric(25),
+  /**
+   * Places calls per US/Pacific day, matching Google's own reset boundary.
+   *
+   * 30 x 31 = 930, inside the 1,000/month Enterprise allowance with room to
+   * spare. Do not raise it without redoing that arithmetic: 35 a day is 1,085
+   * in a long month, and the last 85 are billable.
+   */
+  PLACES_DAILY_LIMIT: numeric(30),
   /** Businesses per sweep. The user-facing limit; MAX_CALLS is the backstop. */
   MAX_RESULTS: numeric(100),
-  MAX_TILE_DEPTH: numeric(4),
+  // Depth 1 - a tile may be quartered once and no further. Depth 2 allows up
+  // to 21 tiles per term, which a 30-call day cannot pay for.
+  MAX_TILE_DEPTH: numeric(1),
   // Read through the schema rather than straight off process.env: the server
   // used to read this before loadEnv() had loaded the file, so setting it in
   // .env did nothing at all.
