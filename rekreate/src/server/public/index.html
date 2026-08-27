@@ -394,18 +394,24 @@
 
   /* Saved searches — every run is already a file, so nothing is ever lost to
      a refresh. */
-  .history { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .history .lbl {
-    color: var(--text-faint); font-size: 11px; text-transform: uppercase;
-    letter-spacing: .08em; margin-right: 2px;
+  .history {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    border-top: 1px solid var(--line-soft); padding-top: 12px;
   }
   .history button {
+    display: inline-flex; align-items: center; gap: 7px;
     background: var(--panel-2); border: 1px solid var(--line); color: var(--text-dim);
     border-radius: 999px; padding: 4px 11px; font-size: 12px; cursor: pointer;
   }
   .history button:hover { color: var(--brand-text); border-color: var(--brand); }
   .history button:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
-  .history button .when { color: var(--text-faint); margin-left: 6px; }
+  .history .sep { color: var(--text-faint); }
+  .history .n {
+    background: var(--line-soft); border-radius: 999px;
+    padding: 1px 7px; font-size: 11px; color: var(--text-dim);
+  }
+  .history .runs { color: var(--text-faint); font-size: 11px; }
+  .history .when { color: var(--text-faint); font-size: 11px; }
   .empty { padding: 44px; text-align: center; color: var(--text-faint); }
 
   /* --------------------------------------------------------- bulk bar --- */
@@ -515,10 +521,27 @@
     font-style: normal; text-transform: none; letter-spacing: 0;
     color: var(--text-faint); font-weight: 400; margin-left: 6px;
   }
+  /* One labelled row per fact. This was a single paragraph with bold words
+     scattered through it: every number was present, and none of them were
+     findable at a glance. */
   .sizing {
-    font-size: 12px; color: var(--text-dim); line-height: 1.55;
+    font-size: 12px; color: var(--text-dim); line-height: 1.5;
     background: var(--panel-2); border: 1px solid var(--line);
-    border-radius: 9px; padding: 9px 12px;
+    border-radius: 9px; padding: 11px 13px;
+    display: grid; gap: 8px;
+  }
+  .sizing .s {
+    display: grid; grid-template-columns: 92px minmax(0, 1fr);
+    gap: 12px; align-items: baseline;
+  }
+  .sizing .s-k {
+    font-size: 11px; font-weight: 600; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  .sizing .s.today { border-top: 1px solid var(--line-soft); padding-top: 8px; }
+  .sizing .s.today .s-k { color: var(--warn-text); }
+  @media (max-width: 720px) {
+    .sizing .s { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   }
   .sizing b { color: var(--text); font-weight: 600; }
   .sizing .warn { color: var(--warn-text); }
@@ -527,11 +550,15 @@
     font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11.5px;
   }
   .alert a { color: inherit; font-weight: 600; }
+  /* Two groups, not five loose controls: what to keep, and what to fetch.
+     Without a divider they read as one ragged row. */
   .quality {
-    display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end;
+    display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end;
     padding-top: 12px; border-top: 1px solid var(--line-soft);
   }
-  .quality .f { flex: 0 0 130px; }
+  .qset { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-end; }
+  .qdiv { align-self: stretch; width: 1px; background: var(--line-soft); margin: 2px 0 10px; }
+  .quality .f { flex: 0 0 118px; }
   .toggle {
     display: flex; align-items: center; gap: 8px; font-size: 13px;
     color: var(--text-dim); cursor: pointer; padding-bottom: 9px;
@@ -539,11 +566,18 @@
   .toggle input { width: 15px; height: 15px; accent-color: var(--brand); cursor: pointer; }
   .toggle:hover { color: var(--text); }
 
+  /* The label sits ABOVE its chips, not beside them. Inline, each chip row
+     started at whatever x its own label happened to end at, and a row that
+     wrapped dropped back under the label. That is what looked crooked. */
   .quick { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .quick .lbl {
+  .quick .lbl, .history .lbl {
+    flex: 0 0 100%; margin: 0;
     font-size: 11px; font-weight: 600; letter-spacing: .09em;
-    text-transform: uppercase; color: var(--text-faint); margin-right: 2px;
+    text-transform: uppercase; color: var(--text-faint);
   }
+  /* An empty row still costs the form a 12px gap, which reads as a stray
+     space nobody put there. */
+  .quick:empty, .history:empty, #search-result:empty { display: none; }
   .quick button {
     font: inherit; font-size: 12.5px; padding: 4px 11px; border-radius: 999px;
     border: 1px solid var(--line); background: var(--panel-2);
@@ -637,29 +671,36 @@
                 title="Stops the sweep. Calls already sent are already paid for; nothing further is spent, and what was found is still saved.">Cancel</button>
       </div>
       <div class="quality">
-        <label class="f narrow">
-          <span>Min rating</span>
-          <input id="q-minrating" class="field" type="number" placeholder="any"
-                 min="0" max="5" step="0.1"
-                 title="Google's scale runs 0-5, not 0-10. 3.5 is what most people mean by 7/10.">
-        </label>
-        <label class="f narrow">
-          <span>Min reviews</span>
-          <input id="q-minreviews" class="field" type="number" placeholder="any" min="0"
-                 title="Review count is the best size signal a listing carries. Google does not publish revenue.">
-        </label>
-        <label class="toggle">
-          <input type="checkbox" id="q-requireemail">
-          Only keep prospects with an email
-        </label>
-        <label class="toggle">
-          <input type="checkbox" id="q-requirewebsite">
-          Must have a website
-        </label>
-        <label class="toggle" title="Visiting each site is the slow part of a run. Turn it off for a fast list of names and phone numbers.">
-          <input type="checkbox" id="q-audit" checked>
-          Visit each website
-        </label>
+        <!-- Two groups answering two different questions: which listings are
+             worth keeping, and how much of each one to go and fetch. -->
+        <div class="qset">
+          <label class="f narrow">
+            <span>Min rating</span>
+            <input id="q-minrating" class="field" type="number" placeholder="any"
+                   min="0" max="5" step="0.1"
+                   title="Google's scale runs 0-5, not 0-10. 3.5 is what most people mean by 7/10.">
+          </label>
+          <label class="f narrow">
+            <span>Min reviews</span>
+            <input id="q-minreviews" class="field" type="number" placeholder="any" min="0"
+                   title="Review count is the best size signal a listing carries. Google does not publish revenue.">
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="q-requireemail">
+            Only keep prospects with an email
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="q-requirewebsite">
+            Must have a website
+          </label>
+        </div>
+        <span class="qdiv" aria-hidden="true"></span>
+        <div class="qset">
+          <label class="toggle" title="Visiting each site is the slow part of a run. Turn it off for a fast list of names and phone numbers.">
+            <input type="checkbox" id="q-audit" checked>
+            Visit each website
+          </label>
+        </div>
       </div>
 
       <div class="sizing" id="sizing"></div>
@@ -1029,22 +1070,36 @@
     const perCall = 20;                 // one Places page, at most
     const callsForLimit = Math.ceil(limit / perCall);
 
-    sizingBox.innerHTML =
-      '<b>Stop at ' + fmt(limit) + ' businesses</b>' + (limitRead.isDefault ? dflt : '') +
-      ' — roughly <b>' + fmt(callsForLimit) + '</b>+ API calls, since one call returns at most ' + perCall + '. ' +
-      'Well inside the <b>' + fmt(budget) + '</b>-call ceiling set in .env.' +
-      '<br><b>Split depth ' + d + '</b>' + (depth.isDefault ? dflt : '') + ' — up to <b>' + fmt(tiles) + '</b> tile' + (tiles === 1 ? '' : 's') +
-      ' per search term (' + scale + '), across ' + termLabel + '. ' +
-      'Google caps every query at 60 results, so a tile only splits when it comes back full — ' +
-      'a quiet area costs one call however deep you allow.' +
-      (worstTotal === null
-        ? '<br>Worst case ' + fmt(perTerm) + ' calls per term. <span class="warn">Fewer terms is the cheapest way to cut a search down.</span>'
+    /* One row per fact, each under its own label. Same sentences, same
+       numbers — but a reader looking for "what will this cost" can now find
+       the line instead of parsing a paragraph for it. */
+    const row = (k, t, cls) =>
+      '<div class="s' + (cls ? ' ' + cls : '') + '"><span class="s-k">' + k +
+      '</span><span class="s-t">' + t + '</span></div>';
+
+    const rows = [
+      row('Businesses',
+        'Stop at <b>' + fmt(limit) + '</b>' + (limitRead.isDefault ? dflt : '') +
+        ' — roughly <b>' + fmt(callsForLimit) + '</b>+ API calls, since one call returns at most ' +
+        perCall + '. Well inside the <b>' + fmt(budget) + '</b>-call ceiling set in .env.'),
+      row('Split depth',
+        '<b>' + d + '</b>' + (depth.isDefault ? dflt : '') + ' — up to <b>' + fmt(tiles) + '</b> tile' +
+        (tiles === 1 ? '' : 's') + ' per search term (' + scale + '), across ' + termLabel + '. ' +
+        'Google caps every query at 60 results, so a tile only splits when it comes back full — ' +
+        'a quiet area costs one call however deep you allow.'),
+      worstTotal === null
+        ? row('Worst case',
+            fmt(perTerm) + ' calls per term. <span class="warn">Fewer terms is the cheapest way ' +
+            'to cut a search down.</span>')
         : tight
-          ? '<br><span class="warn">Worst case ' + fmt(worstTotal) + ' calls (' + fmt(perTerm) + ' × ' + termCount +
-            '), so in a dense area the ' + fmt(budget) + '-call ceiling stops the sweep before the business limit does.</span>' +
-            ' Fewer terms or a tighter location beats a deeper split.'
-          : '<br>Worst case <b>' + fmt(worstTotal) + '</b> calls (' + fmt(perTerm) + ' per term × ' + termCount +
-            '), inside the ' + fmt(budget) + '-call ceiling.');
+          ? row('Worst case',
+              '<span class="warn"><b>' + fmt(worstTotal) + '</b> calls (' + fmt(perTerm) + ' × ' + termCount +
+              '), so in a dense area the ' + fmt(budget) + '-call ceiling stops the sweep before the ' +
+              'business limit does.</span> Fewer terms or a tighter location beats a deeper split.')
+          : row('Worst case',
+              '<b>' + fmt(worstTotal) + '</b> calls (' + fmt(perTerm) + ' per term × ' + termCount +
+              '), inside the ' + fmt(budget) + '-call ceiling.'),
+    ];
 
     /* The ceiling that actually bites is today's remaining allowance, not the
        per-run setting. A sweep sized past it is not refused — it runs and stops
@@ -1053,16 +1108,18 @@
       const need = worstTotal === null ? perTerm : worstTotal;
       const planned = Math.min(need, budget);
       if (DAY_REMAINING === 0) {
-        sizingBox.innerHTML +=
-          '<br><span class="warn">No Places calls left today.</span> Auditing and pushing still work — ' +
-          'neither costs Places quota.';
+        rows.push(row('Today',
+          '<span class="warn">No Places calls left today.</span> Auditing and pushing still work — ' +
+          'neither costs Places quota.', 'today'));
       } else if (planned > DAY_REMAINING) {
-        sizingBox.innerHTML +=
-          '<br><span class="warn">This sweep is sized at up to ' + fmt(planned) + ' calls but only <b>' +
+        rows.push(row('Today',
+          '<span class="warn">This sweep is sized at up to ' + fmt(planned) + ' calls but only <b>' +
           fmt(DAY_REMAINING) + '</b> remain today.</span> It will run and stop partway; the tiles it ' +
-          'finishes are cached, so tomorrow it resumes rather than starting over.';
+          'finishes are cached, so tomorrow it resumes rather than starting over.', 'today'));
       }
     }
+
+    sizingBox.innerHTML = rows.join('');
   }
 
   renderSizing();
@@ -1394,6 +1451,10 @@
         // table holding hundreds of rows — the list count and the campaign
         // audience both did exactly that.
         totals = totalsOf(leads);
+        // The sidebar counter is not part of any render* function, so listing
+        // the renderers by hand missed it: it sat at 0 beside a table holding
+        // hundreds of rows. Same omission the comment above describes.
+        document.getElementById("nav-count").textContent = fmt(leads.length);
         renderChips();
         renderLists();
         renderAudience();
@@ -1681,16 +1742,48 @@
     return Math.round(mins / 1440) + 'd ago';
   };
 
+  /* Running the same search twice writes two files, and both used to get a
+     chip. Seven chips on the row, of which three were "roofing contractor ·
+     camden nj usa" and two more were the same search typed as "Camden, NJ,
+     USA" — the row wrapped onto a second line to say one thing four times.
+     Collapse on the niche plus a location stripped of punctuation and case,
+     and keep the newest, which is the run anybody would actually reopen.
+     The rest are disclosed rather than hidden: the chip carries a x3 and the
+     tooltip says so. Every file is still on disk and still reopenable by
+     path — nothing here deletes anything. */
+  const histKey = (s) =>
+    String(s.niche || '').trim().toLowerCase() + '|' +
+    String(s.location || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+  const histWhen = (s) => Date.parse(s && s.when) || 0;
+
   function loadHistory() {
     fetch('/api/searches')
       .then((r) => r.json())
       .then(({ items }) => {
         const el = document.getElementById('history');
         if (!items || !items.length) { el.innerHTML = ''; return; }
-        el.innerHTML = '<span class="lbl">Recent</span>' + items.slice(0, 8).map((s) =>
-          '<button type="button" data-file="' + esc(s.file) + '" title="' + esc(s.file) + '">' +
-          esc(s.niche || 'search') + ' &middot; ' + esc(s.location) +
-          (s.prospects !== null && s.prospects !== undefined ? ' (' + fmt(s.prospects) + ')' : '') +
+
+        const byKey = new Map();
+        for (const item of items) {
+          const key = histKey(item);
+          const seen = byKey.get(key);
+          if (!seen) byKey.set(key, { newest: item, runs: 1 });
+          else {
+            seen.runs += 1;
+            // Do not trust the order the API happened to return them in.
+            if (histWhen(item) > histWhen(seen.newest)) seen.newest = item;
+          }
+        }
+        const uniq = [...byKey.values()].sort((a, b) => histWhen(b.newest) - histWhen(a.newest));
+
+        el.innerHTML = '<span class="lbl">Recent</span>' + uniq.slice(0, 8).map(({ newest: s, runs }) =>
+          '<button type="button" data-file="' + esc(s.file) + '" title="' + esc(s.file) +
+          (runs > 1 ? esc(' — the newest of ' + runs + ' runs of this search') : '') + '">' +
+          esc(s.niche || 'search') + '<span class="sep">&middot;</span>' + esc(s.location) +
+          (s.prospects !== null && s.prospects !== undefined
+            ? '<span class="n">' + fmt(s.prospects) + '</span>' : '') +
+          (runs > 1 ? '<span class="runs">&times;' + runs + '</span>' : '') +
           '<span class="when">' + esc(ago(s.when)) + '</span></button>').join('');
       })
       .catch(() => { /* history is a convenience; never break the page over it */ });
