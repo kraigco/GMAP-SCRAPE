@@ -21,6 +21,18 @@ if (existsSync('.env')) process.loadEnvFile('.env');
 const { loadEnv } = await import('../config/env.ts');
 const { fetchStoredLeads } = await import('../export/sheets.ts');
 const { verifyContacts, renderReport } = await import('../verify/contacts.ts');
+const { guardSocketTeardown } = await import('../lib/fetch-guard.ts');
+
+/**
+ * Probing 300+ strangers' servers means meeting the one Node bug a try block
+ * cannot reach: assert(!this.paused) thrown from a socket's end event, on a
+ * connection nobody is awaiting. It killed this run outright on the first
+ * attempt, after every site had been fetched and before the report was
+ * written — the whole point of the run lost to one server closing rudely.
+ * Counted, not silenced, so the workaround cannot quietly become permanent.
+ */
+let socketBugs = 0;
+guardSocketTeardown(() => { socketBugs += 1; });
 
 const env = loadEnv();
 
@@ -83,4 +95,10 @@ if (report.uncheckedEmails.length > 0) {
   );
 }
 console.log(`  ${report.blockedSites.length} sites block us in robots.txt (status unknown by choice)`);
+if (socketBugs > 0) {
+  console.log(
+    `  ${socketBugs} connection(s) hit the Node socket-teardown bug and were skipped — ` +
+      `their sites are neither confirmed up nor confirmed down.`,
+  );
+}
 console.log(`\n  Written to ${out}\n`);
