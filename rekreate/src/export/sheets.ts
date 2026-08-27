@@ -442,3 +442,86 @@ export async function fetchStoredLeads(
     return empty(err instanceof Error ? err.message : String(err));
   }
 }
+
+/* ------------------------------------------------------------------ patch -- */
+
+/** A column the Web App will let a person correct by hand. */
+export type PatchableColumn =
+  | 'name' | 'address' | 'phone' | 'email' | 'email_alt' | 'website'
+  | 'review_status' | 'notes';
+
+export type LeadPatch = {
+  placeId: string;
+  column: PatchableColumn;
+  /** Empty string clears the cell. */
+  value: string;
+};
+
+export type PatchApplied = {
+  placeId: string;
+  column: string;
+  before: string;
+  after: string;
+  changed: boolean;
+};
+
+export type PatchResult = {
+  ok: boolean;
+  applied: PatchApplied[];
+  /** Cells whose value actually differed. */
+  changed: number;
+  error: string | null;
+};
+
+/**
+ * Correct named cells without going through the upsert.
+ *
+ * `pushLeads` rewrites every column a scrape owns, which includes `last_seen`
+ * and `google_refreshed_at` — so using it to fix one email records a Google
+ * refresh that never happened, and that timestamp is what the 30-day cache rule
+ * is measured from. This writes only the cells named.
+ *
+ * The Web App validates the whole batch before writing any of it, so a rejected
+ * column name or an unknown place_id leaves the sheet untouched rather than
+ * half-applied.
+ */
+export async function patchLeads(
+  patches: readonly LeadPatch[],
+  target: SheetsTarget,
+): Promise<PatchResult> {
+  const fail = (error: string): PatchResult => ({ ok: false, applied: [], changed: 0, error });
+
+  if (!isConfigured(target.url, target.token)) {
+    return fail('SHEETS_WEBAPP_URL or SHEETS_INGEST_TOKEN is not set');
+  }
+  if (patches.length === 0) return { ok: true, applied: [], changed: 0, error: null };
+
+  let response: Response;
+  try {
+    response = await fetch(target.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: target.token, action: 'patch', patches }),
+      redirect: 'follow',
+    });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+
+  // The Web App answers 200 to everything, a sign-in interstitial included, so
+  // the body decides — never the status.
+  const text = await response.text();
+  let body: { ok?: boolean; applied?: PatchApplied[]; changed?: number; error?: string };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    return fail(
+      text.trimStart().startsWith('<')
+        ? 'the Web App returned HTML, not JSON — usually a stale deployment or a sign-in page. Retry, then check the deployment.'
+        : `unreadable response: ${text.slice(0, 120)}`,
+    );
+  }
+
+  if (!body.ok) return fail(body.error ?? 'the Web App rejected the patch without saying why');
+  return { ok: true, applied: body.applied ?? [], changed: body.changed ?? 0, error: null };
+}

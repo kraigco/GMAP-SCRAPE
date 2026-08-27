@@ -96,6 +96,31 @@ const COLUMNS = [
  */
 const REFRESH_RANGES = [[2, 25], [28, 32]];
 
+/**
+ * Columns a person is allowed to correct by hand, through ?action=patch.
+ *
+ * Deliberately short, and everything left out is left out for a reason.
+ *
+ *   place_id            the key. Changing it does not edit a row, it orphans one.
+ *   first_listed        history. It records when we first saw them, once.
+ *   last_seen           when a scrape last touched this row.
+ *   google_refreshed_at when Google data was last actually fetched.
+ *
+ * Those last two are the reason this whole action exists. Clearing one email
+ * through the normal upsert would have stamped both with the time of the edit,
+ * recording a Google refresh that never happened — and google_refreshed_at is
+ * what the 30-day cache rule is measured from. A timestamp records that a
+ * machine did something; writing one by hand makes it a claim instead.
+ *
+ * hook, hook_basis, score, score_band and score_why are also absent. They are
+ * derived from the audit, and a hand-written hook is exactly the invented
+ * problem the engine refuses to produce.
+ */
+const PATCHABLE = [
+  'name', 'address', 'phone', 'email', 'email_alt', 'website',
+  'review_status', 'notes',
+];
+
 const RUN_COLUMNS = [
   'finished_at', 'location', 'niche', 'terms', 'prospects', 'with_email',
   'tiles', 'tiles_split', 'calls_used', 'max_calls', 'estimated_cost_usd',
@@ -120,6 +145,13 @@ function doPost(e) {
     }
     if (body.token !== expected) {
       return json({ ok: false, error: 'bad token' });
+    }
+
+    // Absent action means ingest, so every existing caller keeps working
+    // unchanged — this deployment must stay backward compatible with the
+    // dashboard and CLI that are already pointed at it.
+    if (body.action === 'patch') {
+      return json(patchLeads(body.patches || []));
     }
 
     const result = ingest(body.leads || [], body.run || null);
@@ -278,6 +310,92 @@ function ingest(leads, run) {
 
     const total = Math.max(0, sheet.getLastRow() - 1);
     return { inserted: inserted, updated: updated, total: total };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Write named columns on named rows, and nothing else.
+ *
+ * The upsert cannot do this. It rewrites every column a scrape owns, including
+ * the two timestamps, so using it to correct one field records a refresh that
+ * did not happen. This touches only the cells asked for.
+ *
+ * Every patch is checked before ANY cell is written: a batch with one bad
+ * column name changes nothing at all. A partial write here would be the worst
+ * outcome, because the caller would have to diff the sheet to find out what
+ * actually landed.
+ *
+ * Returns what happened per patch rather than a bare count — "2 of 5 applied"
+ * with no way to tell which three were missing is not a usable answer.
+ */
+function patchLeads(patches) {
+  if (!patches.length) return { ok: false, error: 'no patches supplied' };
+  if (patches.length > 500) return { ok: false, error: 'too many patches in one call (max 500)' };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = book().getSheetByName(LEADS_TAB);
+    if (!sheet) return { ok: false, error: 'no ' + LEADS_TAB + ' tab' };
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { ok: false, error: 'the sheet holds no leads' };
+
+    const ids = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    const rowOf = {};
+    for (let i = 0; i < ids.length; i++) {
+      const id = String(ids[i][0] || '');
+      if (id) rowOf[id] = i + 2;               // 1-based, and row 1 is the header
+    }
+
+    // Validate the whole batch first. Nothing is written until all of it passes.
+    const planned = [];
+    for (let i = 0; i < patches.length; i++) {
+      const p = patches[i] || {};
+      const id = String(p.placeId || '');
+      const column = String(p.column || '');
+
+      if (!id) return { ok: false, error: 'patch ' + i + ' has no placeId' };
+      if (PATCHABLE.indexOf(column) === -1) {
+        return {
+          ok: false,
+          error: 'patch ' + i + ': column "' + column + '" is not patchable. Allowed: ' +
+            PATCHABLE.join(', '),
+        };
+      }
+      if (!Object.prototype.hasOwnProperty.call(rowOf, id)) {
+        return { ok: false, error: 'patch ' + i + ': no lead with place_id ' + id };
+      }
+
+      planned.push({
+        row: rowOf[id],
+        col: COLUMNS.indexOf(column) + 1,
+        placeId: id,
+        column: column,
+        value: p.value === undefined || p.value === null ? '' : String(p.value),
+      });
+    }
+
+    const applied = [];
+    for (let i = 0; i < planned.length; i++) {
+      const job = planned[i];
+      const cell = sheet.getRange(job.row, job.col);
+      const before = String(cell.getValue() || '');
+      // Report a no-op as a no-op. "Applied" on a cell that already held the
+      // value invites a caller to believe it changed something.
+      cell.setValue(job.value);
+      applied.push({
+        placeId: job.placeId,
+        column: job.column,
+        before: before,
+        after: job.value,
+        changed: before !== job.value,
+      });
+    }
+
+    return { ok: true, applied: applied, changed: applied.filter(function (a) { return a.changed; }).length };
   } finally {
     lock.releaseLock();
   }
