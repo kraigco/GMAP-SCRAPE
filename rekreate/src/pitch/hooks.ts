@@ -19,6 +19,13 @@ import type { Lead, Signal } from '../lead/signals.ts';
  * cover thirty-six combinations, and adding a niche costs one sentence.
  */
 
+/**
+ * The rating at or above which we will quote a prospect's own standing back to
+ * them. Below it the review count may be healthy but the reputation is not, and
+ * a line built on "you have a reputation worth directing" stops being true.
+ */
+export const GOOD_RATING = 4.0;
+
 /** How customers reach this kind of business — which is what a broken site costs. */
 export type Audience =
   | 'emergency-trade'
@@ -41,7 +48,13 @@ const AUDIENCE_PATTERNS: { audience: Audience; test: RegExp }[] = [
 ];
 
 export function audienceFor(niche: string): Audience {
-  const found = AUDIENCE_PATTERNS.find((p) => p.test.test(niche));
+  // Niches arrive both as saved ids ("property-management") and as free text
+  // ("property management"). Matching the raw string sent the flagship niche —
+  // the whole first target segment — to `general`, so every Philadelphia letter
+  // got the fallback stakes line instead of the one written for landlords.
+  // Normalising here fixes it once, rather than in each pattern separately.
+  const normalised = niche.replace(/[-_]+/g, ' ');
+  const found = AUDIENCE_PATTERNS.find((p) => p.test.test(normalised));
   return found ? found.audience : 'general';
 }
 
@@ -83,8 +96,19 @@ function observation(lead: Lead, checkedOn: string | null): string | null {
    * and flattery a prospect can disprove in one glance costs more than it
    * wins. The bar is the same `thin-reviews` line the scoring already draws,
    * so the two can never disagree about what counts as established.
+   *
+   * Volume is not enough on its own, though: the sentence argues that they have
+   * standing worth directing somewhere, and at 1.6 stars that argument is false
+   * and the compliment reads as a dig. Nine of the fourteen established no-site
+   * leads on the Philadelphia list sit under 4.0, so this is the common case,
+   * not the edge one. Below the bar we say the plainer thing, which is just as
+   * true and insults nobody.
    */
-  const established = lead.rating !== null && reviews > 0 && !lead.signals.includes('thin-reviews');
+  const established =
+    lead.rating !== null &&
+    lead.rating >= GOOD_RATING &&
+    reviews > 0 &&
+    !lead.signals.includes('thin-reviews');
   const standing = `${reviews} review${reviews === 1 ? '' : 's'} at ${(lead.rating ?? 0).toFixed(1)} stars`;
 
   // Ordered by how much the finding actually costs the prospect. The first one
@@ -99,10 +123,12 @@ function observation(lead: Lead, checkedOn: string | null): string | null {
     return `Your website did not load${when} — a search for you currently ends at an error page.`;
   }
   if (lead.signals.includes('no-viewport')) {
-    return `Your site is not built for phones${when}, so it renders desktop-width on a handset.`;
+    // Past tense throughout: "is not built for phones when we checked" is the
+    // tense slip you only hear by reading the finished line out loud.
+    return `Your site was not built for phones${when} — it renders desktop-width on a handset.`;
   }
   if (lead.signals.includes('insecure')) {
-    return `Your site still runs on http${when}, so browsers mark it "Not secure" before anyone reads a word.`;
+    return `Your site was still on http${when}, so browsers mark it "Not secure" before anyone reads a word.`;
   }
   if (lead.signals.includes('slow')) {
     const seconds = lead.ttfb !== null ? ` — about ${(lead.ttfb / 1000).toFixed(1)} seconds before anything appears` : '';

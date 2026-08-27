@@ -214,3 +214,65 @@ describe('checkDate', () => {
     expect(hook.text).not.toContain('null');
   });
 });
+
+/**
+ * Three faults found by reading the generated copy on the real Philadelphia
+ * list rather than by reading the assertions. All three passed the suite.
+ */
+describe('faults only visible in the finished copy', () => {
+  it('routes a hyphenated niche id the same as its free-text form', () => {
+    // The saved niche is `property-management` and the search filenames carry
+    // that form, so the flagship segment — every Philadelphia letter — was
+    // getting the `general` fallback stakes line instead of the property one.
+    expect(audienceFor('property-management')).toBe('property');
+    expect(audienceFor('property-management')).toBe(audienceFor('property management'));
+    expect(audienceFor('roofing-contractor')).toBe('emergency-trade');
+    expect(audienceFor('dental-clinic')).toBe('appointment');
+    expect(audienceFor('self_storage')).toBe('property');
+  });
+
+  it('will not quote a poor rating back as though it were standing', () => {
+    // "You have 20 reviews at 1.6 stars and no website to send any of it to"
+    // is measured, true, and an insult. The sentence claims they have a
+    // reputation worth directing; below the bar that claim is false.
+    const lead = toLead(
+      place({ websiteUri: undefined, rating: 1.6, userRatingCount: 20 }),
+      null,
+    );
+    const hook = buildHook(lead, { niche: 'property management', checkedOn: '26 Aug' });
+
+    expect(hook.text).not.toContain('1.6');
+    expect(hook.text).not.toContain('stars');
+    // It still says the true, plainer thing rather than going silent.
+    expect(hook.text).toContain('no website attached');
+    expect(hook.basis).toBe('no-site');
+  });
+
+  it('still quotes standing when the standing is real', () => {
+    const lead = toLead(
+      place({ websiteUri: undefined, rating: 4.7, userRatingCount: 31 }),
+      null,
+    );
+    const hook = buildHook(lead, { niche: 'property management', checkedOn: '26 Aug' });
+
+    expect(hook.text).toContain('31 reviews at 4.7 stars');
+  });
+
+  it('keeps every observation in the past tense', () => {
+    // Read aloud, "your site is not built for phones when we checked on 26 Aug"
+    // is the slip an assertion on substrings never catches.
+    const noViewport = buildHook(
+      toLead(place(), audit({ mobileViewport: 'no' })),
+      { niche: 'property management', checkedOn: '26 Aug' },
+    );
+    expect(noViewport.text).toContain('was not built for phones');
+    expect(noViewport.text).not.toContain('is not built for phones when');
+
+    const insecure = buildHook(
+      toLead(place({ websiteUri: 'http://otter.test' }), audit({ https: 'no' })),
+      { niche: 'property management', checkedOn: '26 Aug' },
+    );
+    expect(insecure.text).toContain('was still on http');
+    expect(insecure.text).not.toContain('still runs on http when');
+  });
+});
