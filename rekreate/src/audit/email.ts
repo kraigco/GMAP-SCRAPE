@@ -77,6 +77,11 @@ function isPlausible(address: string): boolean {
   if (FILE_SUFFIX.test(address)) return false;
   if (address.includes('..') || local.length > 64 || address.length > 254) return false;
   if (!host.includes('.')) return false;
+  // Belt and braces behind normalise(). A local part still carrying a percent
+  // escape is one decodeURIComponent refused — malformed markup, not an
+  // address — and one that opens on punctuation is the tail of something else
+  // the regex ran into. Neither is safe to send to.
+  if (local.includes('%') || !/^[a-z0-9]/.test(local)) return false;
   // A bare numeric TLD or a hex-looking local part is almost always a tracking id.
   if (/^[0-9a-f]{16,}$/.test(local)) return false;
   if (NOISE_HOSTS.some((n) => host === n || host.endsWith('.' + n))) return false;
@@ -138,16 +143,37 @@ function safeDecode(value: string): string {
   }
 }
 
+/**
+ * Bring a candidate to one comparable shape before anything judges it.
+ *
+ * The two collection paths below used to disagree about escaping: the mailto
+ * branch decoded, the bare-text branch did not, and EMAIL_RE's local part
+ * accepts `%` and `-`. So markup carrying `mailto:%20info@acme.com` produced
+ * BOTH the correct `info@acme.com` from one path and the junk
+ * `%20info@acme.com` from the other, and nothing downstream rejected the
+ * second — it reached the campaign as a real address. Decoding once here, then
+ * stripping the punctuation a percent escape or a stray hyphen leaves on the
+ * front, collapses the pair to a single address.
+ */
+function normalise(candidate: string): string {
+  return safeDecode(candidate)
+    .trim()
+    .toLowerCase()
+    .replace(/^[^a-z0-9]+/, '')
+    .replace(/[.,;:]+$/, '');
+}
+
 export function extractEmails(html: string, siteHost?: string): string[] {
   const content = stripNonContent(html);
   const found = new Set<string>();
 
   for (const match of content.matchAll(MAILTO_RE)) {
-    const raw = safeDecode(match[1] ?? '').trim().toLowerCase();
+    const raw = normalise(match[1] ?? '');
     if (raw) found.add(raw);
   }
   for (const match of content.matchAll(EMAIL_RE)) {
-    found.add(match[0].trim().toLowerCase().replace(/\.$/, ''));
+    const raw = normalise(match[0]);
+    if (raw) found.add(raw);
   }
 
   const host = siteHost ? bareHost(siteHost) : null;

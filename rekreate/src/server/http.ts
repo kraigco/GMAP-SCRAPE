@@ -10,7 +10,7 @@ import { PlacesQuotaError } from '../places/quota.ts';
 import { LOCATION_SEEDS, NICHE_SUGGESTIONS } from '../config/niche-suggestions.ts';
 import { leadToEnrichedRow, parseEnrichedCsv, renderEnrichedCsv } from '../export/csv.ts';
 import { parseSearchBaseName, searchBaseName, writeUnique } from '../export/search-file.ts';
-import { SIGNAL_LABELS, SLOW_TTFB_MS, summarise, THIN_REVIEW_COUNT } from '../lead/signals.ts';
+import { LOW_RATING, SIGNAL_LABELS, SLOW_TTFB_MS, summarise, THIN_REVIEW_COUNT } from '../lead/signals.ts';
 import { describeResult, fetchStoredLeads, isConfigured, pushLeads, toSheetLead } from '../export/sheets.ts';
 import { peek } from '../places/usage.ts';
 import { TILE_CACHE_PATH } from '../places/tile-cache.ts';
@@ -364,7 +364,7 @@ const server = createServer((req, res) => {
         // its thresholds have one definition; the dashboard renders whatever
         // it is told, so a new signal cannot silently vanish from the table.
         signals: SIGNAL_LABELS,
-        thresholds: { slowTtfbMs: SLOW_TTFB_MS, thinReviews: THIN_REVIEW_COUNT },
+        thresholds: { slowTtfbMs: SLOW_TTFB_MS, thinReviews: THIN_REVIEW_COUNT, lowRating: LOW_RATING },
         minQueryLength: MIN_QUERY_LENGTH,
         // Same reason as the signals above: the page must not hardcode a budget
         // that .env can change, or the sizing hint will describe a run you would

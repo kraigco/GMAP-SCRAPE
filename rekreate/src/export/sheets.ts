@@ -1,5 +1,6 @@
 import { buildHook, checkDate } from '../pitch/hooks.ts';
 import type { Lead } from '../lead/signals.ts';
+import { scoreLead } from '../scoring/score.ts';
 
 /**
  * Push leads into the spreadsheet through its own Apps Script.
@@ -42,6 +43,9 @@ export type SheetLead = {
   /** The opening line, derived from what the audit measured. Empty when nothing honest could be said. */
   hook: string;
   hookBasis: string;
+  score: number;
+  scoreBand: string;
+  scoreWhy: string;
 };
 
 export type SheetRun = {
@@ -123,6 +127,11 @@ export function toSheetLead(lead: Lead, context: PushContext): SheetLead {
     // When there is no hook, the cell says WHY rather than sitting blank — a
     // lead with no gap needs a different approach, not a silent gap in the sheet.
     hookBasis: hook.text ? hook.basis : (hook.reason ?? 'none'),
+    score: lead.score.total,
+    scoreBand: lead.score.band,
+    // The reasons, joined, so the sheet explains its own ranking. A number with
+    // no account of itself is a number a salesperson learns to distrust.
+    scoreWhy: lead.score.reasons.join('; '),
   };
 }
 
@@ -325,7 +334,7 @@ export function rowToStoredLead(columns: string[], row: unknown[]): StoredLead |
   const website = at('website');
   const emailAlt = at('email_alt').split(/\s+/).filter(Boolean);
 
-  return {
+  const stored = {
     id,
     name: at('name'),
     address: at('address'),
@@ -359,6 +368,14 @@ export function rowToStoredLead(columns: string[], row: unknown[]): StoredLead |
     hook: at('hook'),
     hookBasis: at('hook_basis'),
   };
+
+  // The signals come back from the sheet verbatim rather than being re-derived,
+  // because the sheet is the record of what the audit found on the day it ran.
+  // The SCORE is not stored the same way: it is a ranking, and a ranking that
+  // predates a change to the weights would silently contradict every freshly
+  // scored lead sitting next to it in the same table. Recomputing it here from
+  // the stored signals costs nothing and keeps one meaning of "call this first".
+  return { ...stored, score: scoreLead(stored as unknown as Lead) };
 }
 
 /**

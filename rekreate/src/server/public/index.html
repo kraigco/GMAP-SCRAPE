@@ -402,6 +402,20 @@
   .pill { display: inline-block; font-size: 11.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
   .pill.info { background: var(--info-bg); color: var(--info-text); }
   .pill.warn { background: var(--warn-bg); color: var(--warn-text); }
+  .pill.good { background: var(--good-bg); color: var(--good-text); }
+  .pill.crit { background: var(--crit-bg); color: var(--crit-text); }
+
+  /* The score reads as a number first and a colour second — the band is a hint
+     about where to stop reading down the list, not the information itself. */
+  .score {
+    display: inline-block; min-width: 34px; text-align: center;
+    font-variant-numeric: tabular-nums; font-weight: 600; font-size: 12.5px;
+    padding: 3px 7px; border-radius: 6px; cursor: help;
+  }
+  .score.band-hot  { background: var(--crit-bg); color: var(--crit-text); }
+  .score.band-warm { background: var(--warn-bg); color: var(--warn-text); }
+  .score.band-cool { background: var(--info-bg); color: var(--info-text); }
+  .score.band-cold { background: var(--panel-2); color: var(--muted); }
 
   .flags { display: flex; flex-wrap: wrap; gap: 4px; }
   .flag { font-size: 10.5px; padding: 2px 7px; border-radius: 4px; white-space: nowrap; font-weight: 500; }
@@ -770,6 +784,7 @@
           <thead>
             <tr>
               <th class="pick"><input type="checkbox" id="pick-all" aria-label="Select all shown"></th>
+              <th class="sortable num" data-sort="score" title="Who to call first: opportunity, reachability and how established they look">Score</th>
               <th>Status</th>
               <th>List</th>
               <th class="sortable" data-sort="name">Name</th>
@@ -841,7 +856,7 @@
   const selected = new Set();
   let activeFilter = 'all';
   let query = '';
-  let sortKey = 'reviews';
+  let sortKey = 'score';
   let sortDir = -1;
   let searching = false;
 
@@ -855,6 +870,7 @@
      reviews" while the engine scores at 15 is a lie the UI tells for free. */
   let SLOW_LABEL = 'Slow site';
   let THIN_LABEL = 'Few reviews';
+  let LOW_RATING_LABEL = 'Low rating';
 
   const FILTERS = [
     { id: 'all',          label: 'All',        test: () => true },
@@ -862,7 +878,12 @@
     { id: 'no-site',      label: 'No website', test: (l) => !l.website },
     { id: 'down',         label: 'Site down',  test: (l) => l.signals.includes('down') },
     { id: 'insecure',     label: 'No HTTPS',   test: (l) => l.signals.includes('insecure') },
+    /* Was missing while every other site defect had a chip, so the leads whose
+       only flaw is a desktop-width site were unreachable from the filter bar. */
+    { id: 'no-viewport',  label: 'Not mobile', test: (l) => l.signals.includes('no-viewport') },
     { id: 'slow',         label: () => SLOW_LABEL, test: (l) => l.signals.includes('slow') },
+    { id: 'no-contact-form', label: 'No enquiry form', test: (l) => l.signals.includes('no-contact-form') },
+    { id: 'low-rating',   label: () => LOW_RATING_LABEL, test: (l) => l.signals.includes('low-rating') },
     { id: 'thin-reviews', label: () => THIN_LABEL, test: (l) => l.signals.includes('thin-reviews') },
     { id: 'clean',        label: 'No signals', test: (l) => l.signals.length === 0 },
   ];
@@ -971,6 +992,7 @@
       if (thresholds) {
         SLOW_LABEL = 'Slow (over ' + (thresholds.slowTtfbMs / 1000) + 's)';
         THIN_LABEL = 'Under ' + thresholds.thinReviews + ' reviews';
+        if (thresholds.lowRating) LOW_RATING_LABEL = 'Under ' + thresholds.lowRating.toFixed(1) + ' stars';
       }
       if (budget) {
         if (budget.maxResults) DEFAULT_LIMIT = budget.maxResults;
@@ -1417,6 +1439,9 @@
           const ac = a.collectedAt || '9999', bc = b.collectedAt || '9999';
           return ac < bc ? -sortDir : ac > bc ? sortDir : 0;
         }
+        // `score` is an object, not a number, so it cannot go through the
+        // generic branch below with the other sortable columns.
+        if (sortKey === 'score') return ((a.score ? a.score.total : 0) - (b.score ? b.score.total : 0)) * sortDir;
         const av = a[sortKey], bv = b[sortKey];
         if (av === null && bv === null) return 0;
         if (av === null) return 1;              // missing data always sinks
@@ -1562,7 +1587,7 @@
     pickAll.indeterminate = !allPicked && visible.some((l) => selected.has(l.id));
 
     if (!visible.length) {
-      body.innerHTML = '<tr><td colspan="10" class="empty">No prospects match that filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="11" class="empty">No prospects match that filter.</td></tr>';
       renderBulk();
       return;
     }
@@ -1588,10 +1613,24 @@
           ? '<span class="sub site"><a href="' + esc(l.website) + '" target="_blank" rel="noopener noreferrer">' + esc(l.host) + '</a></span>'
           : '<span class="sub none">no website</span>');
 
+      /* The score, with its reasons on hover. A ranking nobody can interrogate
+         is one a salesperson stops trusting the first time it looks wrong. */
+      const sc = l.score || { total: 0, band: 'cold', reasons: [] };
+      const scoreCell = '<span class="score band-' + esc(sc.band) + '"' +
+        (sc.reasons && sc.reasons.length ? ' title="' + esc(sc.reasons.join(' · ')) + '"' : '') +
+        '>' + sc.total + '</span>';
+
+      /* Was hardcoded to "Unreviewed" for every row, so the column the sheet
+         protects from re-scrapes — the one a human marks up — read the same
+         whatever they had written in it. */
+      const status = l.reviewStatus || 'unreviewed';
+      const statusCls = status === 'unreviewed' ? 'info' : status === 'won' ? 'good' : status === 'lost' ? 'crit' : 'warn';
+
       const picked = selected.has(l.id);
       return '<tr class="' + (picked ? 'picked' : '') + '">' +
         '<td class="pick"><input type="checkbox" data-pick="' + esc(l.id) + '"' + (picked ? ' checked' : '') + '></td>' +
-        '<td><span class="pill info">Unreviewed</span></td>' +
+        '<td class="num">' + scoreCell + '</td>' +
+        '<td><span class="pill ' + statusCls + '">' + esc(status.charAt(0).toUpperCase() + status.slice(1)) + '</span></td>' +
         '<td><span class="pill warn">Prospect</span></td>' +
         '<td><span class="firm">' + esc(l.name) + '</span>' + (l.address ? '<span class="sub">' + esc(l.address) + '</span>' : '') + '</td>' +
         '<td>' + email + '</td>' +
@@ -1806,6 +1845,9 @@
     ['mobile_viewport', (l) => l.viewport], ['contact_form', (l) => l.contactForm],
     ['final_url', (l) => l.finalUrl], ['audit_error', (l) => l.auditError],
     ['signals', (l) => l.signals.join(' ')],
+    ['score', (l) => (l.score ? l.score.total : '')],
+    ['score_why', (l) => (l.score ? l.score.reasons.join('; ') : '')],
+    ['review_status', (l) => l.reviewStatus || ''],
   ];
 
   /* A cell beginning =, +, - or @ is executed as a formula when the file is

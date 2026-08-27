@@ -134,6 +134,24 @@ function observation(lead: Lead, checkedOn: string | null): string | null {
     const seconds = lead.ttfb !== null ? ` — about ${(lead.ttfb / 1000).toFixed(1)} seconds before anything appears` : '';
     return `Your site was slow to respond${when}${seconds}.`;
   }
+  if (lead.signals.includes('no-contact-form')) {
+    // Last, because a working site with no form still works — the visitor has
+    // to pick up the phone rather than give up. The signal is only ever raised
+    // when the audit finished looking, so this sentence is safe to send.
+    return `Your site had no way to send an enquiry${when} — a visitor who is not ready to ring has nothing to do next.`;
+  }
+
+  /**
+   * `low-rating` is deliberately absent, and it must stay absent.
+   *
+   * It is a real finding and it belongs in the scoring and the filters — a firm
+   * at 1.9 stars over twenty-six reviews has a problem worth solving. But an
+   * opening line that quotes it back to them is the exact bug that was already
+   * found and fixed once by reading real letters: "You have 20 reviews at 1.6
+   * stars" reads as a dig from a stranger, and a prospect insulted in sentence
+   * one never reaches sentence two. Reputation work is a conversation to have
+   * after they reply, not a cold open.
+   */
   return null;
 }
 
@@ -154,7 +172,7 @@ export type HookContext = {
 };
 
 /** The finding the line was built on, for the record. */
-const PRIORITY: Signal[] = ['no-site', 'down', 'no-viewport', 'insecure', 'slow'];
+const PRIORITY: Signal[] = ['no-site', 'down', 'no-viewport', 'insecure', 'slow', 'no-contact-form'];
 
 export function buildHook(lead: Lead, context: HookContext): LeadHook {
   const audience = audienceFor(context.niche || lead.primaryType || '');

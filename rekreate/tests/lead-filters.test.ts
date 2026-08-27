@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { filterLeads, filterPlaces, mergeReports } from '../src/lead/filters.ts';
 import type { RawPlace } from '../src/places/schema.ts';
-import type { Lead } from '../src/lead/signals.ts';
+import { withDerived, type Lead, type LeadFacts } from '../src/lead/signals.ts';
 
 function place(over: Partial<RawPlace> & { id: string }): RawPlace {
   return { displayName: { text: 'Firm ' + over.id }, ...over };
 }
 
 function lead(over: Partial<Lead> & { id: string }): Lead {
-  return {
+  const { signals, score, ...facts } = {
     name: 'Firm', address: '', phone: '', website: '', host: '',
     email: '', emailAlt: [], rating: null, reviews: null,
     businessStatus: '', primaryType: '', lat: null, lng: null,
@@ -16,7 +16,11 @@ function lead(over: Partial<Lead> & { id: string }): Lead {
     contactForm: 'unknown', finalUrl: '', auditError: '',
     signals: [], audited: true,
     ...over,
-  };
+  } as Lead;
+  // Through the real constructor, so a fixture can never carry a score the
+  // production path would not have produced for the same facts.
+  const built = withDerived(facts as LeadFacts);
+  return over.signals ? { ...built, signals: over.signals } : built;
 }
 
 describe('rating filter — Google\'s 0-5 scale', () => {

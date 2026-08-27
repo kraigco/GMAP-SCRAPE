@@ -80,16 +80,21 @@ const COLUMNS = [
   'notes',           // AB yours
   'hook',            // AC derived from the audit — refreshed
   'hook_basis',      // AD which finding the hook rests on
+  'score',           // AE 0-100, who to call first — refreshed
+  'score_band',      // AF hot / warm / cool / cold
+  'score_why',       // AG the reasons behind the number
 ];
 
 /**
  * The blocks a re-scrape may overwrite, as [from, to] index pairs.
  *
  * Two ranges rather than one because your columns sit in the middle: the
- * scraper owns C..Z and AC..AD, you own AA..AB, and nothing the scraper does
- * can reach across that gap.
+ * scraper owns C..Z and AC..AG, you own AA..AB, and nothing the scraper does
+ * can reach across that gap. The score columns were appended on the far side
+ * of review_status and notes deliberately — a ranking that overwrote someone's
+ * "contacted" mark would make the sheet unusable as a worklist.
  */
-const REFRESH_RANGES = [[2, 25], [28, 29]];
+const REFRESH_RANGES = [[2, 25], [28, 32]];
 
 const RUN_COLUMNS = [
   'finished_at', 'location', 'niche', 'terms', 'prospects', 'with_email',
@@ -319,6 +324,9 @@ function toRow(lead, now) {
     '',
     str(l.hook),
     str(l.hookBasis),
+    num(l.score),
+    str(l.scoreBand),
+    str(l.scoreWhy),
   ];
 }
 

@@ -33,6 +33,7 @@ const AUDIT: Omit<EnrichedRow, 'base'> = {
   contactForm: 'yes',
   finalUrl: 'https://acme.test/',
   error: null,
+  score: 40,
 };
 
 const HARVEST_ROW = [

@@ -276,3 +276,38 @@ describe('faults only visible in the finished copy', () => {
     expect(insecure.text).not.toContain('still runs on http when');
   });
 });
+
+describe('the two signals added from the corpus audit', () => {
+  it('opens on a missing enquiry form when nothing worse was found', () => {
+    const hook = buildHook(
+      toLead(place(), audit({ contactForm: 'no' })),
+      { niche: 'dentist', checkedOn: '27 Aug' },
+    );
+    expect(hook.basis).toBe('no-contact-form');
+    expect(hook.text).toContain('no way to send an enquiry');
+    expect(hook.text).toContain('27 Aug');
+  });
+
+  it('leads with the costlier finding when a site is also down', () => {
+    const hook = buildHook(
+      toLead(place(), audit({ reachable: 'no', contactForm: 'no' })),
+      { niche: 'dentist' },
+    );
+    expect(hook.basis).toBe('down');
+  });
+
+  /**
+   * The guard that matters. `low-rating` is a real finding and it belongs in the
+   * filters, but quoting a bad score back at a stranger is the bug this project
+   * already found once by reading real letters. It must never become copy.
+   */
+  it('writes nothing about a low rating, and says so rather than inventing a line', () => {
+    const hook = buildHook(
+      toLead(place({ rating: 1.9, userRatingCount: 26 }), audit({})),
+      { niche: 'dentist' },
+    );
+    expect(hook.text).toBe('');
+    expect(hook.basis).toBe('none');
+    expect(hook.reason).toContain('no gap found');
+  });
+});

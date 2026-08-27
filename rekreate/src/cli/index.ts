@@ -9,7 +9,7 @@ import { release, reserve } from '../places/usage.ts';
 import { cachingSweep, load as loadTileCache, TILE_CACHE_PATH } from '../places/tile-cache.ts';
 import { sweepTiles } from '../places/tiling.ts';
 import type { RawPlace, RejectedPlace } from '../places/schema.ts';
-import { parseCsv, writeCsv, writeEnrichedCsv, LEAD_COLUMNS } from '../export/csv.ts';
+import { parseCsv, writeCsv, writeEnrichedCsv, scoreEnrichedRow, LEAD_COLUMNS } from '../export/csv.ts';
 import { filterPlaces } from '../lead/filters.ts';
 import type { EnrichedRow } from '../export/csv.ts';
 import { auditSite } from '../audit/site.ts';
@@ -321,7 +321,7 @@ program
 
     const enriched: EnrichedRow[] = targets.map((row, i) => {
       const a = audits[i]!;
-      return {
+      const measured = {
         base: harvestIdx.map((idx) => (idx === -1 ? '' : row[idx] ?? '')),
         emails: a.emails,
         reachable: a.reachable,
@@ -332,6 +332,7 @@ program
         finalUrl: a.finalUrl,
         error: a.error,
       };
+      return { ...measured, score: scoreEnrichedRow(measured) };
     });
 
     const gated = opts['requireEmail'] === true

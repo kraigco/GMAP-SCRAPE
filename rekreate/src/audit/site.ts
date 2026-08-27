@@ -205,8 +205,18 @@ export async function auditSite(
   if (!home.html || reachable !== 'yes') return audit;
 
   audit.mobileViewport = VIEWPORT_RE.test(home.html) ? 'yes' : 'no';
-  audit.contactForm =
-    FORM_RE.test(home.html) && FORM_HINT.test(home.html) ? 'yes' : 'unknown';
+  if (FORM_RE.test(home.html) && FORM_HINT.test(home.html)) audit.contactForm = 'yes';
+
+  // Whether the search below actually finished — and so whether a 'no' would be
+  // honest. This used to be a ternary with no 'no' branch, which made "we read
+  // the page and there is no form" indistinguishable from "we never looked":
+  // 117 of 268 loaded sites were filed as unknown, and no gap could ever be
+  // derived from the column. But a blanket 'no' would be worse. The contact-page
+  // loop runs only when the homepage gave up no address and stops the moment one
+  // appears, so a site can have a form on a page this audit never fetched.
+  // 'no' is asserted only when nothing was skipped: every candidate link was
+  // followed, or there were none to follow.
+  let examinedAll = false;
 
   // Contact discovery is the one part of the audit that parses a stranger's
   // markup, so it is the one part that can be handed something malformed enough
@@ -220,22 +230,29 @@ export async function auditSite(
 
     // Only chase a contact page when the homepage gave us nothing.
     if (emails.size === 0) {
+      // Every path that leaves a candidate page unread sets this, so the flag
+      // below means what it says rather than "the loop reached its end".
+      let skipped = false;
+
       for (const link of findContactLinks(home.html, home.url, 2)) {
         let path: string;
-        try { path = new URL(link).pathname; } catch { continue; }
-        if (!isAllowed(robots, path)) continue;
+        try { path = new URL(link).pathname; } catch { skipped = true; continue; }
+        if (!isAllowed(robots, path)) { skipped = true; continue; }
 
         try {
           const page = await getPage(link, opts);
           audit.pagesFetched += 1;
-          if (!page.html) continue;
+          if (!page.html) { skipped = true; continue; }
           for (const address of extractEmails(page.html, finalUrl.hostname)) emails.add(address);
           if (audit.contactForm !== 'yes' && FORM_RE.test(page.html)) audit.contactForm = 'yes';
-          if (emails.size > 0) break;
+          if (emails.size > 0) { skipped = true; break; }
         } catch {
           /* one dead contact page does not invalidate the homepage findings */
+          skipped = true;
         }
       }
+
+      examinedAll = !skipped;
     }
 
     audit.emails = [...emails].slice(0, 3);
@@ -243,6 +260,11 @@ export async function auditSite(
     const message = err instanceof Error ? err.message : String(err);
     audit.error = `contact extraction failed: ${message}`.slice(0, 160);
   }
+
+  // Deliberately after the try: extraction throwing means the search did not
+  // finish, and `examinedAll` is still false, so a throw can never produce a
+  // 'no' we would then sell against.
+  if (audit.contactForm !== 'yes' && examinedAll) audit.contactForm = 'no';
 
   return audit;
 }

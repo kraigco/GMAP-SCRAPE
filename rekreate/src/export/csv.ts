@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { RawPlace } from '../places/schema.ts';
-import { deriveSignals } from '../lead/signals.ts';
+import { withDerived } from '../lead/signals.ts';
 import type { Lead } from '../lead/signals.ts';
 
 /**
@@ -109,6 +109,9 @@ export const ENRICHED_COLUMNS = [
   'contact_form',
   'final_url',
   'audit_error',
+  // Derived, not measured — last, so every column that records a fact comes
+  // before every column that interprets one.
+  'score',
 ] as const;
 
 export type EnrichedRow = {
@@ -121,6 +124,7 @@ export type EnrichedRow = {
   contactForm: string;
   finalUrl: string | null;
   error: string | null;
+  score: number;
 };
 
 /**
@@ -156,7 +160,55 @@ export function leadToEnrichedRow(lead: Lead, refreshedAt: string): EnrichedRow 
     contactForm: lead.contactForm,
     finalUrl: lead.finalUrl || null,
     error: lead.auditError || null,
+    score: lead.score.total,
   };
+}
+
+/**
+ * Score a row the CLI's audit stage assembled positionally.
+ *
+ * That command works from a harvest CSV rather than from RawPlace objects, so
+ * it never holds a Lead to score. Rebuilding the facts here — from the same
+ * LEAD_COLUMNS order the row was written in — routes it through `withDerived`
+ * like every other path, rather than giving the CLI a private copy of the
+ * weights that would drift the first time one of them changed.
+ */
+export function scoreEnrichedRow(row: Omit<EnrichedRow, 'score'>): number {
+  const at = (name: (typeof LEAD_COLUMNS)[number]): string =>
+    row.base[LEAD_COLUMNS.indexOf(name)] ?? '';
+  const num = (value: string): number | null => {
+    if (value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+  const website = at('website');
+
+  return withDerived({
+    id: at('place_id'),
+    name: at('name'),
+    address: at('address'),
+    phone: at('phone'),
+    website,
+    host: website ? website.replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '',
+    email: row.emails[0] ?? '',
+    emailAlt: row.emails.slice(1),
+    rating: num(at('rating')),
+    reviews: num(at('review_count')),
+    businessStatus: at('business_status'),
+    primaryType: at('primary_type'),
+    lat: num(at('latitude')),
+    lng: num(at('longitude')),
+    reachable: row.reachable,
+    https: row.https,
+    ttfb: row.ttfbMs,
+    viewport: row.mobileViewport,
+    contactForm: row.contactForm,
+    finalUrl: row.finalUrl ?? '',
+    auditError: row.error ?? '',
+    // This function is only ever reached from the audit command, which has just
+    // visited the site.
+    audited: true,
+  }).score.total;
 }
 
 export function renderEnrichedCsv(rows: EnrichedRow[]): string {
@@ -174,6 +226,7 @@ export function renderEnrichedCsv(rows: EnrichedRow[]): string {
         r.contactForm,
         r.finalUrl ?? '',
         r.error ?? '',
+        r.score.toString(),
       ]
         .map(escapeCell)
         .join(','),
@@ -243,6 +296,6 @@ export function parseEnrichedCsv(text: string): Lead[] {
       audited: reachable !== 'unknown' || finalUrl !== '' || email !== '',
     };
 
-    return { ...base, signals: deriveSignals(base) };
+    return withDerived(base);
   });
 }

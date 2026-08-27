@@ -172,3 +172,41 @@ describe('extractEmails — developer-facing regions', () => {
     expect(extractEmails(html, 'acme.com')).toEqual(['info@acme.com']);
   });
 });
+
+/**
+ * Both collection paths used to disagree about percent escapes: the mailto
+ * branch decoded, the bare-text branch did not, and EMAIL_RE's local part
+ * accepts `%` and `-`. Three junk addresses reached the real Philadelphia and
+ * Makati lists that way — `%20trag@gaocdental.com`, `%20info@oakstreetpm.com`
+ * and `-info@wtprops.com` — each of them a live address we would have mailed.
+ */
+describe('a candidate is normalised before it is judged', () => {
+  it('collapses an escaped mailto to the one address it means', () => {
+    const html = '<a href="mailto:%20info@oakstreetpm.com">Email</a>';
+    expect(extractEmails(html, 'oakstreetpm.com')).toEqual(['info@oakstreetpm.com']);
+  });
+
+  it('does not emit both the decoded and the raw form of the same address', () => {
+    // The exact shape that produced the duplicate: the href is escaped, so the
+    // mailto path decodes it while the text path matches the escape literally.
+    const html = '<a href="mailto:%20trag@gaocdental.com">%20trag@gaocdental.com</a>';
+    expect(extractEmails(html, 'gaocdental.com')).toEqual(['trag@gaocdental.com']);
+  });
+
+  it('strips punctuation the regex ran into on the way in', () => {
+    const html = '<p>e-mail:-info@wtprops.com</p>';
+    expect(extractEmails(html, 'wtprops.com')).toEqual(['info@wtprops.com']);
+  });
+
+  it('rejects a local part still carrying an escape decodeURIComponent refused', () => {
+    // `%zz` is malformed, so safeDecode hands the value back untouched and the
+    // plausibility guard is the only thing standing between it and a campaign.
+    const html = '<p>bo%zzb@acme.com</p>';
+    expect(extractEmails(html, 'acme.com')).toEqual([]);
+  });
+
+  it('leaves an ordinary address alone', () => {
+    const html = '<a href="mailto:first.last@acme.com">First Last</a>';
+    expect(extractEmails(html, 'acme.com')).toEqual(['first.last@acme.com']);
+  });
+});
