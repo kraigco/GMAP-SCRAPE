@@ -4,7 +4,7 @@
  *
  * Nothing else in the pipeline can run until this prints all green.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { getAccessToken, loadServiceAccount, SHEETS_SCOPE } from '../export/google-auth.ts';
 import { PROBE_FIELD_MASK } from '../places/field-mask.ts';
 
@@ -25,6 +25,28 @@ function fail(label: string, detail: string, fix: string): void {
 
 function skip(label: string, why: string): void {
   console.log(`  \x1b[33mSKIP\x1b[0m ${label} — ${why}`);
+}
+
+/**
+ * The column names apps-script/Code.gs declares, read from the file itself.
+ *
+ * A Web App deployment is a snapshot of the code as it stood when it was
+ * deployed, so the repo and the live app drift apart silently every time a
+ * column is added and nobody redeploys. Reading the source here means this
+ * check can never itself be the thing that is out of date.
+ *
+ * Returns [] rather than throwing if the shape ever changes — a check that
+ * cannot read its own reference should skip, not fail the run.
+ */
+function declaredColumns(): string[] {
+  try {
+    const source = readFileSync('apps-script/Code.gs', 'utf8');
+    const block = /const COLUMNS = \[([\s\S]*?)\];/.exec(source);
+    if (!block?.[1]) return [];
+    return [...block[1].matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1] as string);
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------- env
@@ -241,13 +263,24 @@ if (!webappUrl || !webappToken) {
         'Deploy > Manage deployments > pencil > Version: NEW VERSION > Deploy.\n' +
         'Use Manage deployments, never New deployment, or the /exec URL changes.');
     } else {
-      const missing = ['hook', 'hook_basis'].filter((c) => !deployed.includes(c));
-      if (missing.length > 0) {
-        fail('deployed version', `live, but missing column(s): ${missing.join(', ')}`,
-          'Re-paste apps-script/Code.gs, then Deploy > Manage deployments > pencil >\n' +
-          'Version: NEW VERSION > Deploy.');
+      // Compared against the columns apps-script/Code.gs declares RIGHT NOW,
+      // rather than a list written out here. The hardcoded pair went stale the
+      // first time a column was added: the check kept passing while the live
+      // deployment sat three columns behind the repo, which is precisely the
+      // drift it exists to catch.
+      const expected = declaredColumns();
+      const missing = expected.filter((c) => !deployed.includes(c));
+      if (expected.length === 0) {
+        skip('deployed version', 'could not read COLUMNS out of apps-script/Code.gs');
+      } else if (missing.length > 0) {
+        fail('deployed version', `live, but ${missing.length} column(s) behind the repo: ${missing.join(', ')}`,
+          'A deployment is a SNAPSHOT of the code as it stood when you deployed it,\n' +
+          'so saving in the editor changes nothing on its own.\n' +
+          'Apps Script editor > paste apps-script/Code.gs over Code.gs > save, then\n' +
+          'Deploy > Manage deployments > pencil > Version: NEW VERSION > Deploy.\n' +
+          'Use Manage deployments, never New deployment, or the /exec URL changes.');
       } else {
-        pass('deployed version', `${deployed.length} columns — hook and hook_basis present`);
+        pass('deployed version', `${deployed.length} columns — up to date with apps-script/Code.gs`);
       }
     }
   }
