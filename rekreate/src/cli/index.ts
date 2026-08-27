@@ -14,6 +14,7 @@ import { filterPlaces } from '../lead/filters.ts';
 import type { EnrichedRow } from '../export/csv.ts';
 import { auditSite } from '../audit/site.ts';
 import { mapPool } from '../lib/concurrency.ts';
+import { guardSocketTeardown } from '../lib/fetch-guard.ts';
 import { parseEnrichedCsv } from '../export/csv.ts';
 import { parseSearchBaseName } from '../export/search-file.ts';
 import { describeResult, isConfigured, pushLeads, toSheetLead } from '../export/sheets.ts';
@@ -304,6 +305,11 @@ program
     console.log(`  concurrency ${concurrency}, timeout ${timeoutMs}ms`);
     console.log('  fetching each site\'s homepage, then its contact page only if needed\n');
 
+    // Counted rather than silenced, so a workaround cannot quietly become
+    // permanent — the summary prints the number if it is not zero.
+    let socketBugs = 0;
+    guardSocketTeardown(() => { socketBugs += 1; });
+
     let lastPct = -1;
     const audits = await mapPool(
       targets,
@@ -358,6 +364,9 @@ program
     }
     if (opts['requireEmail'] === true) {
       console.log(`  withheld           ${enriched.length - gated.length} row(s) with no email`);
+    }
+    if (socketBugs > 0) {
+      console.log(`  survived           ${socketBugs} client-level socket fault(s) — see src/lib/fetch-guard.ts`);
     }
     console.log(`\n  Wrote ${gated.length} row(s) to ${opts['out']}\n`);
   });
