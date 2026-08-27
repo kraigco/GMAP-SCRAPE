@@ -455,6 +455,10 @@
 
   /* Free-tier meter. Two ceilings apply and the tighter one binds, so both
      are always visible rather than only whichever is closer. */
+  /* [hidden] only sets display:none at browser-default specificity, so a bare
+     `display: flex` here silently beats it and the meter shows its placeholder
+     dashes before any data arrives. */
+  .quota[hidden] { display: none; }
   .quota {
     display: flex; flex-direction: column; gap: 4px;
     padding: 8px 10px; min-width: 208px;
@@ -861,6 +865,11 @@
       foot.classList.remove('blocked');
     }
     box.hidden = false;
+
+    // The hint below the form quotes this figure, so it has to be re-rendered
+    // whenever the meter moves or it will quote a stale one.
+    DAY_REMAINING = q.day && typeof q.day.remaining === 'number' ? q.day.remaining : null;
+    renderSizing();
   }
 
   /** A reset time is only useful in the reader's own timezone. */
@@ -965,6 +974,10 @@
   /* ------------------------------------------------------- sizing hint -- */
   /* Overwritten by /api/suggestions so the page cannot describe a budget that
      .env has changed. These are only the values used before that lands. */
+  /* What the quota meter last read. The sizing hint sizes a sweep against what
+     is LEFT today, not against the configured ceiling: "worst case 21 calls" is
+     reassuring right up until you have four left. */
+  let DAY_REMAINING = null;
   let DEFAULT_LIMIT = 100;
   let CALL_BACKSTOP = 90;
   let DEFAULT_DEPTH = 1;
@@ -1044,6 +1057,24 @@
             ' Fewer terms or a tighter location beats a deeper split.'
           : '<br>Worst case <b>' + fmt(worstTotal) + '</b> calls (' + fmt(perTerm) + ' per term × ' + termCount +
             '), inside the ' + fmt(budget) + '-call ceiling.');
+
+    /* The ceiling that actually bites is today's remaining allowance, not the
+       per-run setting. A sweep sized past it is not refused — it runs and stops
+       partway — so this says so BEFORE the calls are spent rather than after. */
+    if (DAY_REMAINING !== null) {
+      const need = worstTotal === null ? perTerm : worstTotal;
+      const planned = Math.min(need, budget);
+      if (DAY_REMAINING === 0) {
+        sizingBox.innerHTML +=
+          '<br><span class="warn">No Places calls left today.</span> Auditing and pushing still work — ' +
+          'neither costs Places quota.';
+      } else if (planned > DAY_REMAINING) {
+        sizingBox.innerHTML +=
+          '<br><span class="warn">This sweep is sized at up to ' + fmt(planned) + ' calls but only <b>' +
+          fmt(DAY_REMAINING) + '</b> remain today.</span> It will run and stop partway; the tiles it ' +
+          'finishes are cached, so tomorrow it resumes rather than starting over.';
+      }
+    }
   }
 
   depthInput.addEventListener('input', renderSizing);
@@ -1427,7 +1458,7 @@
     }
     if (run.halted) {
       text += '<br><b>The ' + fmt(run.maxCalls) + '-call ceiling ran out</b> before the sweep finished. ' +
-        'That ceiling guards Google's daily cap; raise MAX_CALLS in .env once billing is attached. ';
+        "That ceiling guards Google's daily cap; raise MAX_CALLS in .env once billing is attached. ";
     }
     if (run.aborted) text += '<br><b>Stopped early.</b> The search was cancelled, so this covers only part of the area. What had been paid for was still saved. ';
     if (run.truncatedLeaves > 0) text += '<br><b>' + run.truncatedLeaves + ' area(s) under-sampled</b> — Google held back more results than it would return. Raise Depth above ' + run.maxDepth + '.';
