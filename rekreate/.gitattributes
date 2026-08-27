@@ -1,0 +1,21 @@
+# Line endings, settled once.
+#
+# core.autocrlf=true on this machine rewrote endings on every checkout, so every
+# git command printed "LF will be replaced by CRLF" for files nobody had touched.
+# The noise made real warnings easy to miss. Declaring it here makes the answer a
+# property of the repo rather than of whoever cloned it.
+#
+# LF everywhere: Node reads it, the tests read it, and .gs files are pasted into a
+# web editor that does not care. Nothing in this project needs CRLF.
+* text=auto eol=lf
+
+# Windows-only helpers, if any are ever added, keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary — never touch these.
+*.png binary
+*.docx binary
+*.xlsx binary
+*.zip binary
+*.db binary

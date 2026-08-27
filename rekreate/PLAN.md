@@ -1,6 +1,19 @@
 # Rekreate Lead Intelligence Engine — PLAN
 
-Status: **awaiting review**. No implementation code has been written.
+Status: **largely built.** This document is the original design, kept for the
+reasoning behind each decision. It is no longer a description of what exists.
+
+What is built and running: discovery (recursive tiling), qualify, audit, the
+outreach hook, the Google Sheets export, the dashboard, and a free-tier ledger
+that caps Places usage at 30 calls/day and 1,000/month.
+
+What is still unbuilt, and where the plan below is still a plan rather than a
+record: **Stage 5 (Score)**, **Stage 6 (Pitch)**, the **Postgres schema in
+section 2**, and the Sheets review round-trip. Until persistence lands, the
+30-day TTL that section 2 specifies for Google-sourced fields cannot be
+enforced, and `out/searches/*.csv` is an indefinite store of that data.
+
+For the current state of play, read Rekoll rather than this file.
 
 ---
 

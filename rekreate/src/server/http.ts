@@ -102,7 +102,14 @@ async function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL)
   const maxCalls = env.MAX_CALLS;
   const maxResultsRaw = Number(url.searchParams.get('maxResults'));
   const maxResults = Number.isFinite(maxResultsRaw) && maxResultsRaw > 0 ? maxResultsRaw : env.MAX_RESULTS;
-  const maxDepth = Number(url.searchParams.get('maxDepth') ?? 3);
+  // env.MAX_TILE_DEPTH, not a literal. This said 3 while env said 1 and the page
+  // said 1 - the same setting carrying a different value depending on which
+  // door you came through, which is the third time that pattern has bitten this
+  // file. The page always sends the served value, so this only governed callers
+  // that omit it (a script, an old bookmarked URL) - which is exactly the case
+  // nobody would have noticed sweeping three levels deeper than intended.
+  const depthRaw = Number(url.searchParams.get('maxDepth'));
+  const maxDepth = Number.isFinite(depthRaw) && depthRaw >= 0 ? depthRaw : env.MAX_TILE_DEPTH;
   const audit = url.searchParams.get('audit') !== 'false';
   // Absent means every phrasing, which is what the pipeline did before this
   // existed — so an old link or a script that does not know about it is
