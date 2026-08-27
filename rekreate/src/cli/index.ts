@@ -411,6 +411,7 @@ program
     console.log(`\nPush — ${files.length} file(s) to the Leads tab\n`);
     let added = 0;
     let refreshed = 0;
+    let skipped = 0;
 
     for (const file of files) {
       const leads = parseEnrichedCsv(await readFile(file, 'utf8'));
@@ -419,13 +420,28 @@ program
         continue;
       }
 
+      // A file named off-convention parses to null, and every field derived
+      // from the name then quietly defaults: blank niche, blank location, blank
+      // refresh date — and, worst of the four, an empty niche sends every hook
+      // in the file to the `general` fallback stakes line instead of the one
+      // written for that trade. That is silent and it is wrong in the sheet, so
+      // it is refused rather than warned about. Renaming the file fixes it and
+      // costs nothing; a re-push is free.
       const parsed = parseSearchBaseName(basename(file));
+      if (!parsed) {
+        console.log(`  ${basename(file)} — SKIPPED, the name does not carry a date, location and niche`);
+        console.log('       Expected YYYYMMDD-HHMMSS_location_niche.csv — without it the sheet');
+        console.log('       gets a blank niche and every hook falls back to generic copy.');
+        skipped += 1;
+        continue;
+      }
+
       const result = await pushLeads(
         leads.map((lead) =>
           toSheetLead(lead, {
-            niche: parsed?.niche ?? '',
-            location: parsed?.location ?? '',
-            refreshedAt: parsed?.when ?? '',
+            niche: parsed.niche,
+            location: parsed.location,
+            refreshedAt: parsed.when ?? '',
           }),
         ),
         null,
@@ -442,7 +458,12 @@ program
       refreshed += result.updated;
     }
 
-    console.log(`\n  ${added} new prospect(s), ${refreshed} refreshed.\n`);
+    console.log(`\n  ${added} new prospect(s), ${refreshed} refreshed.`);
+    if (skipped > 0) {
+      console.log(`  ${skipped} file(s) skipped for an unreadable name — rename and re-run, it costs nothing.`);
+      process.exitCode = 1;
+    }
+    console.log('');
   });
 
 await program.parseAsync(process.argv);
