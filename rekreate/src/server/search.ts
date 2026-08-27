@@ -3,6 +3,7 @@ import { mapPool } from '../lib/concurrency.ts';
 import { createPlacesClient } from '../places/client.ts';
 import { dedupeById } from '../places/dedupe.ts';
 import { estimateCostUsd } from '../places/field-mask.ts';
+import { release, reserve } from '../places/usage.ts';
 import { resolveLocation, termsForNiche } from '../places/geocode.ts';
 import { resolveNiche } from '../config/niches/property-management.ts';
 import type { RawPlace } from '../places/schema.ts';
@@ -101,8 +102,14 @@ export type SearchResult = {
   filtered: FilterReport;
 };
 
-/** `fetchImpl` is injected only by the tests — the server passes the real one. */
-export type SearchDeps = { apiKey: string; fetchImpl?: typeof fetch };
+/**
+ * `fetchImpl` is injected only by the tests — the server passes the real one.
+ *
+ * `usagePath` likewise. The free-tier ledger is real state on disk, and a test
+ * suite that writes to the live one spends next month's allowance on assertions
+ * — which it did, 27 calls' worth, before this was injectable.
+ */
+export type SearchDeps = { apiKey: string; fetchImpl?: typeof fetch; usagePath?: string };
 
 export async function runSearch(
   params: SearchParams,
@@ -114,10 +121,10 @@ export async function runSearch(
   if (!location) throw new Error('A location is required.');
   if (!niche) throw new Error('A niche is required.');
 
-  // 90, not 200: an unbilled project caps SearchText at 100 calls/day, so a
-  // 200-call default plans a sweep Google cuts off partway with a 429 that the
-  // cost display cannot see. The ceiling has to sit under the external wall.
-  const maxCalls = Math.max(1, Math.min(1000, params.maxCalls ?? 90));
+  // 45, matching env.MAX_CALLS: the monthly Enterprise free tier is 1,000
+  // calls, which is ~45 a working day. The daily console cap is a separate,
+  // looser wall — the monthly one is what decides whether a bill arrives.
+  const maxCalls = Math.max(1, Math.min(1000, params.maxCalls ?? 45));
   const maxResults = Math.max(1, Math.min(5000, params.maxResults ?? 100));
   const maxDepth = Math.max(0, Math.min(5, params.maxDepth ?? 3));
   const doAudit = params.audit !== false;
@@ -145,12 +152,32 @@ export async function runSearch(
   const report = (stage: SearchProgress['stage'], message: string, callsUsed: number, found: number, pct: number): void =>
     onProgress({ stage, message, callsUsed, found, pct });
 
+  // Claim the run's calls BEFORE anything reaches Google, and that includes
+  // resolving the location: resolveLocation is a places:searchText call like
+  // any other and spends from the same metric. Reserving after it meant an
+  // exhausted month still paid for a geocode before finding out.
+  //
+  // A per-run ceiling cannot make this guarantee by itself; only a figure that
+  // survives between runs can.
+  const ledger = deps.usagePath ? { path: deps.usagePath } : {};
+  const budget = await reserve(maxCalls, ledger);
+  if (budget.granted === 0) {
+    throw new Error(
+      `No free Places calls left this month — ${budget.used} of ${budget.cap} used. ` +
+        `The allowance resets ${budget.resetsAt}. Auditing and pushing still work; ` +
+        `they cost no Places quota.`,
+    );
+  }
+
   report('geocode', `Resolving "${location}"…`, 0, 0, 2);
   const place = await resolveLocation(location, { apiKey: deps.apiKey, ...net });
+  // The client never sees the geocode call, and an uncounted call is exactly
+  // the leak this ledger exists to close.
+  const geocodeCalls = 1;
 
   const client = createPlacesClient({
     apiKey: deps.apiKey,
-    maxCalls,
+    maxCalls: Math.max(0, budget.granted - geocodeCalls),
     shouldStop: stopped,
     ...net,
   });
@@ -255,6 +282,12 @@ export async function runSearch(
   leads = post.kept;
 
   const callsUsed = client.callsUsed();
+
+  // Hand back what the sweep did not spend. Until this runs the month shows
+  // the whole reservation, so an abandoned sweep forfeits its budget rather
+  // than risking a bill.
+  await release(budget.granted, callsUsed + geocodeCalls, ledger);
+
   report('done', `${leads.length} prospects found.`, callsUsed, leads.length, 100);
 
   return {

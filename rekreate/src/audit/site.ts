@@ -129,37 +129,80 @@ export async function auditSite(
     return { ...base, reachable: 'no', error: `unparseable url: ${websiteUri}` };
   }
 
-  const robots = await getRobots(start.origin, opts);
+  let robots = await getRobots(start.origin, opts);
   if (!isAllowed(robots, start.pathname)) {
     return { ...base, robotsBlocked: true, error: 'robots.txt disallows this path' };
   }
 
-  let home: Fetched;
+  let home: Fetched | null = null;
+  let failure: string | null = null;
   try {
     home = await getPage(start.toString(), opts);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      ...base,
-      reachable: 'no',
-      error: message.includes('abort') ? `timeout after ${timeoutMs}ms` : message.slice(0, 160),
-    };
+    failure = message.includes('abort') ? `timeout after ${timeoutMs}ms` : message.slice(0, 160);
+  }
+
+  // A listed http:// URL that will not connect is NOT the same thing as a site
+  // that is down: plenty of businesses stopped serving port 80 entirely, and
+  // Google goes on listing the http:// address it recorded years ago. Measured
+  // on the Philadelphia list, 28 of 39 "unreachable" sites answered fine on
+  // https. Claiming those were down put a falsehood in front of an owner who
+  // can see their own site working, which is the one mistake outreach cannot
+  // survive. So: one retry on the secure scheme before making any claim.
+  if (home === null && start.protocol === 'http:') {
+    const secure = new URL(start.toString().replace(/^http:/i, 'https:'));
+    // A different scheme is a different origin, so the https robots.txt is the
+    // one that governs here - and the http one we just read was itself
+    // unreachable, which getRobots reports as PERMISSIVE. Reusing it would
+    // crawl the secure origin under rules we never actually read.
+    const secureRobots = await getRobots(secure.origin, opts);
+    if (isAllowed(secureRobots, secure.pathname)) {
+      try {
+        home = await getPage(secure.toString(), opts);
+        robots = secureRobots;
+        failure = null;
+      } catch {
+        /* keep the original http failure - it is the one worth reporting */
+      }
+    }
+  }
+
+  if (home === null) {
+    return { ...base, reachable: 'no', error: failure };
   }
 
   const finalUrl = new URL(home.url);
+
+  // 4xx is 'unknown', never 'no'. A 403 means the server answered and refused
+  // this crawler; a 404 means the path Google listed is stale. In both cases
+  // the site is up, and "your website did not load" would be false. Only a
+  // 5xx is a server actually failing to serve. This is the contract the module
+  // header already stated - the old `< 400 ? yes : no` broke it, and fed 'down'
+  // hooks to prospects whose sites were fine.
+  const reachable: AuditState =
+    home.status >= 200 && home.status < 400 ? 'yes' : home.status >= 500 ? 'no' : 'unknown';
+
   const audit: SiteAudit = {
     ...base,
     finalUrl: home.url,
     httpStatus: home.status,
-    ttfbMs: home.ttfbMs,
+    // The error page's timing is not the site's timing, so it is not recorded
+    // as such - otherwise a slow 403 becomes a 'slow' gap about a page the
+    // owner never serves to anyone.
+    ttfbMs: reachable === 'yes' ? home.ttfbMs : null,
     pagesFetched: 1,
-    reachable: home.status >= 200 && home.status < 400 ? 'yes' : 'no',
+    reachable,
     // Judged on where we ENDED UP: a listing of http:// that redirects to
     // https:// is a secure site, and calling it insecure would be a false gap.
     https: finalUrl.protocol === 'https:' ? 'yes' : 'no',
   };
 
-  if (!home.html) return audit;
+  // An error page is still markup, and scanning it answers questions about the
+  // wrong document: a 403 splash with no viewport meta would be reported as
+  // 'no-viewport' for a site whose real pages have one. Only a page we actually
+  // got can be judged.
+  if (!home.html || reachable !== 'yes') return audit;
 
   audit.mobileViewport = VIEWPORT_RE.test(home.html) ? 'yes' : 'no';
   audit.contactForm =

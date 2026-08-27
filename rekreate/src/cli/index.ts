@@ -5,9 +5,10 @@ import { resolveLocation, termsForNiche } from '../places/geocode.ts';
 import { createPlacesClient } from '../places/client.ts';
 import { dedupeById } from '../places/dedupe.ts';
 import { estimateCostUsd, ENTERPRISE_FREE_CALLS_PER_MONTH } from '../places/field-mask.ts';
+import { release, reserve } from '../places/usage.ts';
 import { sweepTiles } from '../places/tiling.ts';
 import type { RawPlace, RejectedPlace } from '../places/schema.ts';
-import { parseCsv, writeCsv, writeEnrichedCsv } from '../export/csv.ts';
+import { parseCsv, writeCsv, writeEnrichedCsv, LEAD_COLUMNS } from '../export/csv.ts';
 import { filterPlaces } from '../lead/filters.ts';
 import type { EnrichedRow } from '../export/csv.ts';
 import { auditSite } from '../audit/site.ts';
@@ -67,11 +68,41 @@ program
       allTerms = termsForNiche(nicheArg);
     }
 
+    const maxCalls = typeof opts['maxCalls'] === 'number' ? opts['maxCalls'] : env.MAX_CALLS;
+    const maxResults = typeof opts['maxResults'] === 'number' ? opts['maxResults'] : env.MAX_RESULTS;
+    const maxDepth = typeof opts['maxDepth'] === 'number' ? opts['maxDepth'] : env.MAX_TILE_DEPTH;
+    const keywordLimit = typeof opts['keywords'] === 'number' ? opts['keywords'] : allTerms.length;
+    const keywords = allTerms.slice(0, keywordLimit);
+    const dryRun = opts['dryRun'] === true;
+
+    // Claim this run's calls out of the month's free allowance BEFORE anything
+    // reaches Google — and that includes resolving the location, which is a
+    // places:searchText call like any other and spends from the same metric.
+    // Reserving after it meant an exhausted month still paid for a geocode and
+    // then reported a raw 429 instead of saying the allowance was gone.
+    //
+    // A per-run cap cannot make this guarantee alone: thirty runs of forty-five
+    // is 1,350 against an allowance of 1,000. Only a figure that outlives the
+    // process can.
+    const budget = await reserve(maxCalls);
+    if (budget.granted === 0) {
+      console.log('\nNo free Places calls left this month.');
+      console.log(`  used       ${budget.used} of ${budget.cap}`);
+      console.log(`  resets     ${budget.resetsAt}`);
+      console.log('  Auditing and pushing still work — they cost no Places quota.\n');
+      return;
+    }
+    const granted = budget.granted;
+
     let bbox;
     let placeLabel: string;
+    // Counted separately from the sweep because the client never sees it, and
+    // an uncounted call is exactly the leak this ledger exists to close.
+    let geocodeCalls = 0;
     if (typeof opts['location'] === 'string' && opts['location'].trim()) {
       process.stdout.write(`  resolving "${opts['location']}" …`);
       const resolved = await resolveLocation(opts['location'], { apiKey: env.GOOGLE_MAPS_API_KEY });
+      geocodeCalls = 1;
       process.stdout.write('\r' + ' '.repeat(60) + '\r');
       bbox = resolved.bbox;
       placeLabel = resolved.formattedAddress;
@@ -88,19 +119,22 @@ program
       placeLabel = market.label;
     }
 
-    const maxCalls = typeof opts['maxCalls'] === 'number' ? opts['maxCalls'] : env.MAX_CALLS;
-    const maxResults = typeof opts['maxResults'] === 'number' ? opts['maxResults'] : env.MAX_RESULTS;
-    const maxDepth = typeof opts['maxDepth'] === 'number' ? opts['maxDepth'] : env.MAX_TILE_DEPTH;
-    const keywordLimit = typeof opts['keywords'] === 'number' ? opts['keywords'] : allTerms.length;
-    const keywords = allTerms.slice(0, keywordLimit);
-    const dryRun = opts['dryRun'] === true;
-
-    const client = createPlacesClient({ apiKey: env.GOOGLE_MAPS_API_KEY, maxCalls });
+    const client = createPlacesClient({
+      apiKey: env.GOOGLE_MAPS_API_KEY,
+      maxCalls: Math.max(0, granted - geocodeCalls),
+    });
 
     console.log(`\nHarvest — ${savedNiche ? savedNiche.label : nicheArg}`);
     console.log(`  location    ${placeLabel}`);
     console.log(`  terms       ${keywords.length} of ${allTerms.length}${savedNiche ? '' : ' (generated — no saved config)'}`);
-    console.log(`  budget      ${maxResults} businesses, ${maxCalls} calls, max depth ${maxDepth}`);
+    console.log(`  budget      ${maxResults} businesses, ${granted} calls, max depth ${maxDepth}`);
+    console.log(
+      `  free tier   ${budget.used} of ${budget.cap} calls reserved this month, ` +
+        `${budget.remaining} left after this run`,
+    );
+    if (granted < maxCalls) {
+      console.log(`  TRIMMED     asked for ${maxCalls}, the month can only afford ${granted}`);
+    }
     console.log(`  output      ${dryRun ? '(dry run — no file written)' : opts['out']}\n`);
 
     const batches: RawPlace[][] = [];
@@ -172,6 +206,11 @@ program
     const withPhone = unique.filter((p) => p.nationalPhoneNumber).length;
     const callsUsed = client.callsUsed();
 
+    // Give back what the sweep did not spend. Until this runs the month shows
+    // the full reservation, which is the right way round: an interrupted run
+    // forfeits its unused budget rather than risking a bill.
+    await release(granted, callsUsed + geocodeCalls);
+
     if (!dryRun && unique.length > 0) {
       await writeCsv(String(opts['out']), unique, new Date().toISOString());
     }
@@ -235,6 +274,16 @@ program
       throw new Error(`${inPath} has no place_id/website columns — is it a harvest CSV?`);
     }
 
+    // The input may already BE an enriched CSV. Re-auditing one is the normal
+    // way to refresh a saved search, and it used to corrupt the output: `base`
+    // carried the WHOLE input row, so renderEnrichedCsv appended the nine audit
+    // columns a second time onto rows that already had them — 30 fields under a
+    // 21-column header. parseEnrichedCsv reads by header position, so it then
+    // returned the STALE values and silently discarded the audit just paid for.
+    // Projecting the harvest columns by NAME makes the output the same shape
+    // whether the input was a raw harvest or an already-enriched file.
+    const harvestIdx = LEAD_COLUMNS.map((column) => header.indexOf(column));
+
     const limit = typeof opts['limit'] === 'number' ? opts['limit'] : body.length;
     const targets = body.slice(0, limit);
     const concurrency = Number(opts['concurrency']);
@@ -259,10 +308,10 @@ program
     );
     process.stdout.write('\r' + ' '.repeat(28) + '\r');
 
-    const enriched: EnrichedRow[] = targets.map((base, i) => {
+    const enriched: EnrichedRow[] = targets.map((row, i) => {
       const a = audits[i]!;
       return {
-        base,
+        base: harvestIdx.map((idx) => (idx === -1 ? '' : row[idx] ?? '')),
         emails: a.emails,
         reachable: a.reachable,
         https: a.https,

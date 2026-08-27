@@ -1,5 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { runSearch } from '../src/server/search.ts';
+
+/**
+ * A throwaway ledger per test file.
+ *
+ * The free-tier ledger is real state on disk. Left at its default path the
+ * suite spends the month's actual Places allowance on assertions — it did,
+ * 27 calls' worth, the first time these tests ran against it.
+ */
+const LEDGER = join(tmpdir(), `rekreate-test-usage-${process.pid}-${'cap'}.json`);
+afterEach(async () => {
+  await rm(LEDGER, { force: true });
+});
 
 /**
  * The sweep must stop at a business count, not just at a call budget.
@@ -83,7 +98,7 @@ describe('runSearch — the business cap', () => {
     const h = harness(20);
     const result = await runSearch(
       { ...base, maxResults: 25 },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(h.tiles).toHaveLength(2);
@@ -96,7 +111,7 @@ describe('runSearch — the business cap', () => {
     const h = harness(20);
     const result = await runSearch(
       { ...base, maxResults: 25 },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(result.leads).toHaveLength(25);
@@ -107,7 +122,7 @@ describe('runSearch — the business cap', () => {
     const h = harness(20);
     const result = await runSearch(
       { ...base, maxResults: 25 },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     // The distinction that matters: halted means the CALL ceiling stopped it,
@@ -123,7 +138,7 @@ describe('runSearch — the business cap', () => {
     const h = harness(2);
     const result = await runSearch(
       { ...base, maxResults: 100 },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(result.leads).toHaveLength(8);
@@ -133,7 +148,7 @@ describe('runSearch — the business cap', () => {
 
   it('defaults to 100 businesses when no cap is given', async () => {
     const h = harness(2);
-    const result = await runSearch(base, { apiKey: 'k', fetchImpl: h.impl });
+    const result = await runSearch(base, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
 
     expect(result.run.maxResults).toBe(100);
   });
@@ -144,7 +159,7 @@ describe('runSearch — the business cap', () => {
     const h = harness(2);
     const result = await runSearch(
       { location: 'Testville', niche: 'dentist', maxDepth: 0, audit: false },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(result.run.maxCalls).toBeLessThan(100);
@@ -152,10 +167,17 @@ describe('runSearch — the business cap', () => {
 
   it('still stops at the call ceiling when that is the tighter limit', async () => {
     // A huge business cap must not disable the budget guard.
+    //
+    // maxCalls covers EVERY Places call the run makes, and resolving the
+    // location is one of them — it hits places:searchText like any other. So
+    // maxCalls 3 leaves the sweep 2, and callsUsed counts only the sweep,
+    // because the client never sees the geocode. Budgeting the sweep the full
+    // maxCalls would put the run one call over the figure it promised, which is
+    // the whole leak the free-tier ledger exists to close.
     const h = harness(1);
     const result = await runSearch(
-      { ...base, maxCalls: 2, maxResults: 5000 },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { ...base, maxCalls: 3, maxResults: 5000 },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(result.run.callsUsed).toBe(2);

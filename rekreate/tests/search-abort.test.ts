@@ -1,7 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { runSearch } from '../src/server/search.ts';
 import { createPlacesClient } from '../src/places/client.ts';
 import type { BBox } from '../src/lib/bbox.ts';
+
+/**
+ * A throwaway ledger per test file.
+ *
+ * The free-tier ledger is real state on disk. Left at its default path the
+ * suite spends the month's actual Places allowance on assertions — it did,
+ * 27 calls' worth, the first time these tests ran against it.
+ */
+const LEDGER = join(tmpdir(), `rekreate-test-usage-${process.pid}-${'abort'}.json`);
+afterEach(async () => {
+  await rm(LEDGER, { force: true });
+});
 
 /**
  * A closed tab must stop the sweep.
@@ -86,7 +101,7 @@ const params = { location: 'Testville', niche: 'dentist', maxCalls: 50, maxDepth
 describe('runSearch — the control case', () => {
   it('sweeps every term and audits every prospect when nobody interrupts', async () => {
     const h = harness();
-    const result = await runSearch(params, { apiKey: 'k', fetchImpl: h.impl });
+    const result = await runSearch(params, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
 
     expect(h.tiles).toHaveLength(4); // termsForNiche('dentist') produces four
     expect(result.leads).toHaveLength(4);
@@ -104,7 +119,7 @@ describe('runSearch — abort', () => {
 
     const result = await runSearch(
       { ...params, signal: controller.signal },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     // One call was in flight when the tab closed. Not a fifth, not a fourth.
@@ -119,7 +134,7 @@ describe('runSearch — abort', () => {
 
     const result = await runSearch(
       { ...params, signal: controller.signal },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(result.leads).toHaveLength(1);
@@ -133,7 +148,7 @@ describe('runSearch — abort', () => {
 
     const result = await runSearch(
       { ...params, signal: controller.signal },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(h.sites).toEqual([]);
@@ -152,7 +167,7 @@ describe('runSearch — abort', () => {
 
     const result = await runSearch(
       { ...params, signal: controller.signal },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     // The location lookup is already away by then — it is one Essentials-tier

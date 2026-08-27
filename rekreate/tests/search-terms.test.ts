@@ -1,5 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { runSearch } from '../src/server/search.ts';
+
+/**
+ * A throwaway ledger per test file.
+ *
+ * The free-tier ledger is real state on disk. Left at its default path the
+ * suite spends the month's actual Places allowance on assertions — it did,
+ * 27 calls' worth, the first time these tests ran against it.
+ */
+const LEDGER = join(tmpdir(), `rekreate-test-usage-${process.pid}-${'terms'}.json`);
+afterEach(async () => {
+  await rm(LEDGER, { force: true });
+});
 
 /**
  * The term limit.
@@ -56,7 +71,7 @@ const base = {
 describe('maxTerms', () => {
   it('sweeps every phrasing when it is not set — the behaviour that came before', async () => {
     const h = harness();
-    const result = await runSearch(base, { apiKey: 'k', fetchImpl: h.impl });
+    const result = await runSearch(base, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
 
     expect(h.tiles).toHaveLength(4);
     expect(result.run.terms).toHaveLength(4);
@@ -66,7 +81,7 @@ describe('maxTerms', () => {
   it('cuts the calls in direct proportion', async () => {
     for (const [limit, expected] of [[1, 1], [2, 2], [3, 3]] as const) {
       const h = harness();
-      const result = await runSearch({ ...base, maxTerms: limit }, { apiKey: 'k', fetchImpl: h.impl });
+      const result = await runSearch({ ...base, maxTerms: limit }, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
 
       expect(h.tiles).toHaveLength(expected);
       expect(result.run.callsUsed).toBe(expected);
@@ -76,13 +91,13 @@ describe('maxTerms', () => {
 
   it('keeps the first phrasings, which are the most direct ones', async () => {
     const h = harness();
-    await runSearch({ ...base, maxTerms: 2 }, { apiKey: 'k', fetchImpl: h.impl });
+    await runSearch({ ...base, maxTerms: 2 }, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
     expect(h.tiles).toEqual(['dentist', 'dentist company']);
   });
 
   it('always reports what it did NOT search', async () => {
     const h = harness();
-    const result = await runSearch({ ...base, maxTerms: 1 }, { apiKey: 'k', fetchImpl: h.impl });
+    const result = await runSearch({ ...base, maxTerms: 1 }, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
 
     // The pair is what makes an incomplete sweep legible: one used, four available.
     expect(result.run.terms).toHaveLength(1);
@@ -91,7 +106,7 @@ describe('maxTerms', () => {
 
   it('ignores a limit wider than the niche has phrasings', async () => {
     const h = harness();
-    const result = await runSearch({ ...base, maxTerms: 99 }, { apiKey: 'k', fetchImpl: h.impl });
+    const result = await runSearch({ ...base, maxTerms: 99 }, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
 
     expect(h.tiles).toHaveLength(4);
     expect(result.run.termsAvailable).toBe(4);
@@ -100,7 +115,7 @@ describe('maxTerms', () => {
   it('treats zero and nonsense as "no limit" rather than searching nothing', async () => {
     for (const limit of [0, -1, Number.NaN]) {
       const h = harness();
-      const result = await runSearch({ ...base, maxTerms: limit }, { apiKey: 'k', fetchImpl: h.impl });
+      const result = await runSearch({ ...base, maxTerms: limit }, { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER });
       expect(result.run.terms).toHaveLength(4);
     }
   });
@@ -109,7 +124,7 @@ describe('maxTerms', () => {
     const h = harness();
     const result = await runSearch(
       { ...base, niche: 'property-management', maxTerms: 2 },
-      { apiKey: 'k', fetchImpl: h.impl },
+      { apiKey: 'k', fetchImpl: h.impl, usagePath: LEDGER },
     );
 
     expect(h.tiles).toHaveLength(2);
