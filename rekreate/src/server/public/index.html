@@ -630,25 +630,6 @@
                  autocomplete="off" required>
           <datalist id="dl-niche"></datalist>
         </label>
-        <label class="f narrow">
-          <span>Max businesses</span>
-          <input id="q-limit" class="field" type="number" placeholder="100" min="1" max="5000"
-                 title="Stop once this many businesses are found. The sweep also stops at the API call ceiling set in .env, whichever comes first.">
-        </label>
-        <label class="f narrow">
-          <span>Split depth</span>
-          <input id="q-depth" class="field" type="number" placeholder="1" min="0" max="5"
-                 title="How many times a full tile may be quartered. Google caps every query at 60 results, so a busy area has to be split to be seen.">
-        </label>
-        <label class="f narrow">
-          <span>Terms</span>
-          <select id="q-terms" class="field"
-                  title="Each phrasing is a separate full sweep, so this multiplies the cost directly. More terms find genuinely different businesses; fewer is cheaper and enough to explore.">
-            <option value="1">1 — cheapest</option>
-            <option value="2" selected>2 — balanced</option>
-            <option value="">All — fullest</option>
-          </select>
-        </label>
         <button class="btn primary tall" type="submit" id="go">Search Google Maps</button>
         <button class="btn tall" type="button" id="cancel" hidden
                 title="Stops the sweep. Calls already sent are already paid for; nothing further is spent, and what was found is still saved.">Cancel</button>
@@ -908,11 +889,10 @@
       if (budget) {
         if (budget.maxResults) DEFAULT_LIMIT = budget.maxResults;
         if (budget.maxCalls) CALL_BACKSTOP = budget.maxCalls;
-        if (typeof budget.maxDepth === 'number') {
-          DEFAULT_DEPTH = budget.maxDepth;
-          depthInput.placeholder = String(DEFAULT_DEPTH);
-        }
-        limitInput.placeholder = String(DEFAULT_LIMIT);
+        if (typeof budget.maxDepth === 'number') DEFAULT_DEPTH = budget.maxDepth;
+        // No placeholders to update any more — these are settings .env owns,
+        // not boxes on the form. The hint still re-renders so it quotes the
+        // figures the server reported rather than the page's own defaults.
         renderSizing();
       }
       // The first render ran before this arrived, on placeholder wording.
@@ -981,24 +961,24 @@
   let DEFAULT_LIMIT = 100;
   let CALL_BACKSTOP = 90;
   let DEFAULT_DEPTH = 1;
+  /* Phrasings per sweep. Each one is a separate full pass over the box, so this
+     is the largest single multiplier on what a search costs — which is exactly
+     why it is a considered default rather than a control to fiddle with. Null
+     would mean every phrasing. */
+  let DEFAULT_TERMS = 2;
 
   /* A blank box means "use the default" — resolved here and nowhere else.
      The hint under the form and the search itself both read these, so the
      hint can never describe a run different from the one you would get. */
-  const readLimit = () => {
-    const raw = limitInput.value.trim();
-    if (raw === '') return { value: DEFAULT_LIMIT, isDefault: true };
-    return { value: Math.max(1, Math.min(5000, Number(raw) || DEFAULT_LIMIT)), isDefault: false };
-  };
-  const readDepth = () => {
-    const raw = depthInput.value.trim();
-    if (raw === '') return { value: DEFAULT_DEPTH, isDefault: true };
-    const n = Number(raw);
-    return { value: Math.max(0, Math.min(5, Number.isFinite(n) ? n : DEFAULT_DEPTH)), isDefault: false };
-  };
+  /* Businesses, split depth and phrasings were once three boxes on the form.
+     They were there to stop a sweep costing more than intended, and the free
+     tier ledger does that job properly now — it cannot be talked past, whereas
+     a number in a box could be. What is left is the configured default, which
+     .env owns and /api/suggestions reports, so the hint below the form still
+     describes the run you would actually get. */
+  const readLimit = () => ({ value: DEFAULT_LIMIT, isDefault: true });
+  const readDepth = () => ({ value: DEFAULT_DEPTH, isDefault: true });
 
-  const depthInput = document.getElementById('q-depth');
-  const limitInput = document.getElementById('q-limit');
   const sizingBox = document.getElementById('sizing');
 
   /* A depth-d tree of quarters holds (4^(d+1) - 1) / 3 tiles. That is the
@@ -1023,8 +1003,7 @@
     /* Terms multiply everything. Each phrasing is a separate full sweep, so
        four terms is four times the calls — the single biggest lever on what a
        search costs, and the one that used to be invisible. */
-    const termChoice = document.getElementById('q-terms').value;
-    const termCount = termChoice === '' ? null : Number(termChoice);
+    const termCount = DEFAULT_TERMS;
     const worstTotal = termCount === null ? null : perTerm * termCount;
     const termLabel = termCount === null
       ? 'every phrasing of the niche (4, or 8 for a saved one)'
@@ -1077,9 +1056,6 @@
     }
   }
 
-  depthInput.addEventListener('input', renderSizing);
-  limitInput.addEventListener('input', renderSizing);
-  document.getElementById('q-terms').addEventListener('change', renderSizing);
   renderSizing();
 
   /* ------------------------------------------------------------- search -- */
@@ -1120,9 +1096,8 @@
     if (requireEmail) qs.set('requireEmail', 'true');
     if (requireWebsite) qs.set('requireWebsite', 'true');
     if (!document.getElementById('q-audit').checked) qs.set('audit', 'false');
-    // Blank means every phrasing — the same as not sending it at all.
-    const termLimit = document.getElementById('q-terms').value;
-    if (termLimit !== '') qs.set('maxTerms', termLimit);
+    // Null means every phrasing — the same as not sending it at all.
+    if (DEFAULT_TERMS !== null) qs.set('maxTerms', String(DEFAULT_TERMS));
     const stream = new EventSource('/api/search?' + qs);
 
     /* Closing the stream drops the connection, which the server sees and acts
