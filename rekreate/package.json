@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "db:migrate": "node src/db/migrate.ts",
     "verify": "node src/cli/verify.ts",
-    "dashboard": "node src/server/http.ts"
+    "dashboard": "node src/server/http.ts",
+    "verify:contacts": "node src/cli/verify-contacts.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.0",
