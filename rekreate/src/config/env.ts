@@ -15,7 +15,21 @@ const numeric = (fallback: number) =>
 
 const envSchema = z.object({
   GOOGLE_MAPS_API_KEY: z.string().min(1, 'GOOGLE_MAPS_API_KEY is empty — run `npm run verify`'),
-  MAX_CALLS: numeric(200),
+  // 45, and the reasoning is a monthly budget rather than a daily one.
+  //
+  // Two separate limits apply. The console quota caps SearchText at 100/day
+  // on this project. The one that decides whether a BILL arrives is Google's
+  // per-SKU free tier: our field mask is Enterprise, which grants only 1,000
+  // calls a month, and those allowances stopped pooling when the universal
+  // $200 credit was retired in March 2025.
+  //
+  // 1,000/month over ~22 working days is ~45 a day, so a run capped here is
+  // one free sweep per working day. At 90 a single run spends a tenth of the
+  // month. Raise it only against a month with room left in it, not against
+  // the daily cap - the daily cap is not what gets charged.
+  MAX_CALLS: numeric(45),
+  /** Businesses per sweep. The user-facing limit; MAX_CALLS is the backstop. */
+  MAX_RESULTS: numeric(100),
   MAX_TILE_DEPTH: numeric(4),
   // Read through the schema rather than straight off process.env: the server
   // used to read this before loadEnv() had loaded the file, so setting it in

@@ -24,6 +24,14 @@ export type SearchParams = {
   location: string;
   niche: string;
   maxCalls?: number;
+  /**
+   * Stop the sweep once this many distinct businesses have been collected.
+   *
+   * This is the control a person actually wants: you think in businesses, not
+   * in API calls. It is a COVERAGE decision, not a tuning knob - hitting it
+   * means the market was not exhausted, so `resultCapReached` reports it.
+   */
+  maxResults?: number;
   maxDepth?: number;
   /**
    * Use only the first N phrasings of the niche.
@@ -70,6 +78,9 @@ export type SearchResult = {
      */
     termsAvailable: number;
     maxCalls: number;
+    maxResults: number;
+    /** The sweep stopped because it had collected `maxResults` businesses. */
+    resultCapReached: boolean;
     maxDepth: number;
     callsUsed: number;
     tilesSearched: number;
@@ -103,7 +114,11 @@ export async function runSearch(
   if (!location) throw new Error('A location is required.');
   if (!niche) throw new Error('A niche is required.');
 
-  const maxCalls = Math.max(1, Math.min(1000, params.maxCalls ?? 200));
+  // 90, not 200: an unbilled project caps SearchText at 100 calls/day, so a
+  // 200-call default plans a sweep Google cuts off partway with a 429 that the
+  // cost display cannot see. The ceiling has to sit under the external wall.
+  const maxCalls = Math.max(1, Math.min(1000, params.maxCalls ?? 90));
+  const maxResults = Math.max(1, Math.min(5000, params.maxResults ?? 100));
   const maxDepth = Math.max(0, Math.min(5, params.maxDepth ?? 3));
   const doAudit = params.audit !== false;
   const concurrency = params.concurrency ?? 8;
@@ -144,11 +159,19 @@ export async function runSearch(
   let tilesSplit = 0;
   let truncatedLeaves = 0;
   let halted = false;
+  // A running dedupe, so the sweep can stop the moment it has enough. This only
+  // decides WHEN to halt; dedupeById below remains the authority on the result.
+  const seen = new Set<string>();
+  let resultCapReached = false;
 
   for (const [i, term] of terms.entries()) {
     if (stopped()) break;
     if (client.budgetExhausted()) {
       halted = true;
+      break;
+    }
+    if (seen.size >= maxResults) {
+      resultCapReached = true;
       break;
     }
     report(
@@ -163,9 +186,10 @@ export async function runSearch(
       place.bbox,
       async (bbox) => {
         const tile = await client.searchTile(term, bbox);
+        for (const place of tile.places) seen.add(place.id);
         return { items: tile.places, truncated: tile.truncated };
       },
-      { maxDepth, shouldHalt: () => client.budgetExhausted() || stopped() },
+      { maxDepth, shouldHalt: () => client.budgetExhausted() || stopped() || seen.size >= maxResults },
     );
 
     batches.push(sweep.items);
@@ -177,8 +201,14 @@ export async function runSearch(
 
   const { unique, duplicatesDropped } = dedupeById(batches);
 
+  // A tile returns up to 20 at once, so the sweep can cross the cap mid-tile.
+  // Trim to what was asked for; `resultCapReached` keeps the fact that the
+  // market was NOT exhausted visible, rather than passing a slice off as a whole.
+  if (seen.size >= maxResults) resultCapReached = true;
+  const collected = resultCapReached ? unique.slice(0, maxResults) : unique;
+
   const filters = params.filters ?? {};
-  const pre = filterPlaces(unique, filters);
+  const pre = filterPlaces(collected, filters);
   const candidates = pre.kept;
 
   if (pre.report.dropped.length) {
@@ -234,6 +264,8 @@ export async function runSearch(
       terms,
       termsAvailable: available.length,
       maxCalls,
+      maxResults,
+      resultCapReached,
       maxDepth,
       callsUsed,
       tilesSearched,

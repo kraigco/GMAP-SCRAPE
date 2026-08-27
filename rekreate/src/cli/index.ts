@@ -36,6 +36,7 @@ program
   .option('-m, --market <id>', 'saved market, used when --location is absent', 'philadelphia-core')
   .option('-T, --terms <a,b,c>', 'exact search terms, overriding the niche')
   .option('--max-calls <n>', 'hard ceiling on Places API calls', (v) => Number(v))
+  .option('--max-results <n>', 'stop once this many businesses are found', (v) => Number(v))
   .option('--max-depth <n>', 'tiling recursion floor', (v) => Number(v))
   .option('-k, --keywords <n>', 'use only the first N keywords', (v) => Number(v))
   .option('--min-rating <n>', 'drop anything rated below this (Google scale, 0-5)', (v) => Number(v))
@@ -88,6 +89,7 @@ program
     }
 
     const maxCalls = typeof opts['maxCalls'] === 'number' ? opts['maxCalls'] : env.MAX_CALLS;
+    const maxResults = typeof opts['maxResults'] === 'number' ? opts['maxResults'] : env.MAX_RESULTS;
     const maxDepth = typeof opts['maxDepth'] === 'number' ? opts['maxDepth'] : env.MAX_TILE_DEPTH;
     const keywordLimit = typeof opts['keywords'] === 'number' ? opts['keywords'] : allTerms.length;
     const keywords = allTerms.slice(0, keywordLimit);
@@ -98,7 +100,7 @@ program
     console.log(`\nHarvest — ${savedNiche ? savedNiche.label : nicheArg}`);
     console.log(`  location    ${placeLabel}`);
     console.log(`  terms       ${keywords.length} of ${allTerms.length}${savedNiche ? '' : ' (generated — no saved config)'}`);
-    console.log(`  budget      ${maxCalls} calls, max depth ${maxDepth}`);
+    console.log(`  budget      ${maxResults} businesses, ${maxCalls} calls, max depth ${maxDepth}`);
     console.log(`  output      ${dryRun ? '(dry run — no file written)' : opts['out']}\n`);
 
     const batches: RawPlace[][] = [];
@@ -108,11 +110,20 @@ program
     let truncatedLeaves = 0;
     let maxDepthHit = 0;
     let halted = false;
+    // A running dedupe, so the sweep can stop the moment it has enough. Only
+    // decides WHEN to halt; dedupeById below stays the authority on the result.
+    const seen = new Set<string>();
+    let resultCapReached = false;
 
     for (const keyword of keywords) {
       if (client.budgetExhausted()) {
         halted = true;
         console.log(`  skipped "${keyword}" — budget spent`);
+        continue;
+      }
+      if (seen.size >= maxResults) {
+        resultCapReached = true;
+        console.log(`  skipped "${keyword}" — ${maxResults}-business limit reached`);
         continue;
       }
 
@@ -121,9 +132,10 @@ program
         async (bbox) => {
           const tile = await client.searchTile(keyword, bbox);
           rejected.push(...tile.rejected);
+          for (const place of tile.places) seen.add(place.id);
           return { items: tile.places, truncated: tile.truncated };
         },
-        { maxDepth, shouldHalt: () => client.budgetExhausted() },
+        { maxDepth, shouldHalt: () => client.budgetExhausted() || seen.size >= maxResults },
       );
 
       batches.push(sweep.items);
@@ -148,7 +160,12 @@ program
     };
 
     const deduped = dedupeById(batches);
-    const filterResult = filterPlaces(deduped.unique, filters);
+    // A tile returns up to 20 at once, so the sweep can cross the cap mid-tile.
+    // Trim to what was asked for; the summary still says the market was not
+    // exhausted, rather than passing a slice off as the whole of it.
+    if (seen.size >= maxResults) resultCapReached = true;
+    const collected = resultCapReached ? deduped.unique.slice(0, maxResults) : deduped.unique;
+    const filterResult = filterPlaces(collected, filters);
     const unique = filterResult.kept;
     const duplicatesDropped = deduped.duplicatesDropped;
     const withWebsite = unique.filter((p) => p.websiteUri).length;
@@ -166,6 +183,10 @@ program
     console.log(`  with a phone       ${withPhone}`);
     console.log(`  tiles searched     ${tilesSearched} (${tilesSplit} split, deepest ${maxDepthHit})`);
     console.log(`  calls used         ${callsUsed} of ${maxCalls}`);
+    if (resultCapReached) {
+      console.log(`  PARTIAL            stopped at the ${maxResults}-business limit — the market holds more.`);
+      console.log('                     Raise --max-results to cover the rest.');
+    }
     console.log(
       `  estimated cost     $${estimateCostUsd(callsUsed).toFixed(2)} ` +
         `(first ${ENTERPRISE_FREE_CALLS_PER_MONTH}/month are free)`,

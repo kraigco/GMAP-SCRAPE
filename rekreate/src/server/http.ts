@@ -93,7 +93,13 @@ async function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL)
 
   const location = url.searchParams.get('location') ?? '';
   const niche = url.searchParams.get('niche') ?? '';
-  const maxCalls = Number(url.searchParams.get('maxCalls') ?? 200);
+  // The call budget is no longer taken from the query string. It is a backstop
+  // against Google's daily cap, not a per-search preference, so it comes from
+  // .env where it can be raised once billing is attached. What the dashboard
+  // sends is a business count, which is the limit a person actually reasons about.
+  const maxCalls = env.MAX_CALLS;
+  const maxResultsRaw = Number(url.searchParams.get('maxResults'));
+  const maxResults = Number.isFinite(maxResultsRaw) && maxResultsRaw > 0 ? maxResultsRaw : env.MAX_RESULTS;
   const maxDepth = Number(url.searchParams.get('maxDepth') ?? 3);
   const audit = url.searchParams.get('audit') !== 'false';
   // Absent means every phrasing, which is what the pipeline did before this
@@ -136,7 +142,7 @@ async function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL)
   try {
     const result = await runSearch(
       {
-        location, niche, maxCalls, maxDepth, audit, filters,
+        location, niche, maxCalls, maxResults, maxDepth, audit, filters,
         signal: control.signal,
         ...(maxTerms === undefined ? {} : { maxTerms }),
       },
@@ -287,6 +293,8 @@ async function readSearch(file: string): Promise<unknown> {
       duplicatesDropped: 0,
       estimatedCostUsd: 0,
       maxCalls: 0,
+      maxResults: 0,
+      resultCapReached: false,
       maxDepth: 0,
       halted: false,
       aborted: false,
@@ -342,6 +350,10 @@ const server = createServer((req, res) => {
         signals: SIGNAL_LABELS,
         thresholds: { slowTtfbMs: SLOW_TTFB_MS, thinReviews: THIN_REVIEW_COUNT },
         minQueryLength: MIN_QUERY_LENGTH,
+        // Same reason as the signals above: the page must not hardcode a budget
+        // that .env can change, or the sizing hint will describe a run you would
+        // not actually get. maxCalls is the backstop, maxResults the default cap.
+        budget: { maxCalls: env.MAX_CALLS, maxResults: env.MAX_RESULTS },
       }),
     );
     return;

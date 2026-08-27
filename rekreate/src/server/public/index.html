@@ -593,9 +593,9 @@
           <datalist id="dl-niche"></datalist>
         </label>
         <label class="f narrow">
-          <span>Max calls</span>
-          <input id="q-budget" class="field" type="number" placeholder="200" min="1" max="1000"
-                 title="Hard ceiling. The sweep stops here even if the area is not finished.">
+          <span>Max businesses</span>
+          <input id="q-limit" class="field" type="number" placeholder="100" min="1" max="5000"
+                 title="Stop once this many businesses are found. The sweep also stops at the API call ceiling set in .env, whichever comes first.">
         </label>
         <label class="f narrow">
           <span>Split depth</span>
@@ -790,7 +790,7 @@
 
   fetch('/api/suggestions')
     .then((r) => r.json())
-    .then(({ niches, locations, signals, thresholds, minQueryLength }) => {
+    .then(({ niches, locations, signals, thresholds, minQueryLength, budget }) => {
       // Labels and thresholds come from the server so there is one definition.
       if (signals) {
         FLAG_META = Object.fromEntries(
@@ -801,6 +801,12 @@
       if (thresholds) {
         SLOW_LABEL = 'Slow (over ' + (thresholds.slowTtfbMs / 1000) + 's)';
         THIN_LABEL = 'Under ' + thresholds.thinReviews + ' reviews';
+      }
+      if (budget) {
+        if (budget.maxResults) DEFAULT_LIMIT = budget.maxResults;
+        if (budget.maxCalls) CALL_BACKSTOP = budget.maxCalls;
+        limitInput.placeholder = String(DEFAULT_LIMIT);
+        renderSizing();
       }
       // The first render ran before this arrived, on placeholder wording.
       renderChips();
@@ -859,16 +865,19 @@
   });
 
   /* ------------------------------------------------------- sizing hint -- */
-  const DEFAULT_BUDGET = 200;
+  /* Overwritten by /api/suggestions so the page cannot describe a budget that
+     .env has changed. These are only the values used before that lands. */
+  let DEFAULT_LIMIT = 100;
+  let CALL_BACKSTOP = 90;
   const DEFAULT_DEPTH = 2;
 
   /* A blank box means "use the default" — resolved here and nowhere else.
      The hint under the form and the search itself both read these, so the
      hint can never describe a run different from the one you would get. */
-  const readBudget = () => {
-    const raw = budgetInput.value.trim();
-    if (raw === '') return { value: DEFAULT_BUDGET, isDefault: true };
-    return { value: Math.max(1, Math.min(1000, Number(raw) || DEFAULT_BUDGET)), isDefault: false };
+  const readLimit = () => {
+    const raw = limitInput.value.trim();
+    if (raw === '') return { value: DEFAULT_LIMIT, isDefault: true };
+    return { value: Math.max(1, Math.min(5000, Number(raw) || DEFAULT_LIMIT)), isDefault: false };
   };
   const readDepth = () => {
     const raw = depthInput.value.trim();
@@ -878,7 +887,7 @@
   };
 
   const depthInput = document.getElementById('q-depth');
-  const budgetInput = document.getElementById('q-budget');
+  const limitInput = document.getElementById('q-limit');
   const sizingBox = document.getElementById('sizing');
 
   /* A depth-d tree of quarters holds (4^(d+1) - 1) / 3 tiles. That is the
@@ -888,9 +897,9 @@
 
   function renderSizing() {
     const depth = readDepth();
-    const budgetRead = readBudget();
+    const limitRead = readLimit();
     const d = depth.value;
-    const budget = budgetRead.value;
+    const budget = CALL_BACKSTOP;
     const tiles = maxTiles(d);
     const perTerm = tiles * 3;          // up to 3 pages per tile
 
@@ -912,8 +921,20 @@
 
     const tight = worstTotal !== null ? worstTotal > budget : perTerm * 4 > budget;
     const dflt = ' <span class="dim">(default)</span>';
+
+    /* Two ceilings, and they are not the same thing. The business cap is what
+       you asked for; the call backstop is what Google will actually allow. A
+       sweep stops at whichever it reaches first, so both have to be visible or
+       a run that halts early looks like a bug rather than a limit doing its job. */
+    const limit = limitRead.value;
+    const perCall = 20;                 // one Places page, at most
+    const callsForLimit = Math.ceil(limit / perCall);
+
     sizingBox.innerHTML =
-      '<b>Split depth ' + d + '</b>' + (depth.isDefault ? dflt : '') + ' — up to <b>' + fmt(tiles) + '</b> tile' + (tiles === 1 ? '' : 's') +
+      '<b>Stop at ' + fmt(limit) + ' businesses</b>' + (limitRead.isDefault ? dflt : '') +
+      ' — roughly <b>' + fmt(callsForLimit) + '</b>+ API calls, since one call returns at most ' + perCall + '. ' +
+      'Well inside the <b>' + fmt(budget) + '</b>-call ceiling set in .env.' +
+      '<br><b>Split depth ' + d + '</b>' + (depth.isDefault ? dflt : '') + ' — up to <b>' + fmt(tiles) + '</b> tile' + (tiles === 1 ? '' : 's') +
       ' per search term (' + scale + '), across ' + termLabel + '. ' +
       'Google caps every query at 60 results, so a tile only splits when it comes back full — ' +
       'a quiet area costs one call however deep you allow.' +
@@ -921,14 +942,14 @@
         ? '<br>Worst case ' + fmt(perTerm) + ' calls per term. <span class="warn">Fewer terms is the cheapest way to cut a search down.</span>'
         : tight
           ? '<br><span class="warn">Worst case ' + fmt(worstTotal) + ' calls (' + fmt(perTerm) + ' × ' + termCount +
-            '), so your budget of ' + fmt(budget) + (budgetRead.isDefault ? ' (default)' : '') +
-            ' will stop the sweep early in a dense area.</span> Fewer terms or a tighter location beats a deeper split.'
+            '), so in a dense area the ' + fmt(budget) + '-call ceiling stops the sweep before the business limit does.</span>' +
+            ' Fewer terms or a tighter location beats a deeper split.'
           : '<br>Worst case <b>' + fmt(worstTotal) + '</b> calls (' + fmt(perTerm) + ' per term × ' + termCount +
-            '), inside your budget of ' + fmt(budget) + (budgetRead.isDefault ? dflt : '') + '.');
+            '), inside the ' + fmt(budget) + '-call ceiling.');
   }
 
   depthInput.addEventListener('input', renderSizing);
-  budgetInput.addEventListener('input', renderSizing);
+  limitInput.addEventListener('input', renderSizing);
   document.getElementById('q-terms').addEventListener('change', renderSizing);
   renderSizing();
 
@@ -939,7 +960,7 @@
 
     const location = document.getElementById('q-location').value.trim();
     const niche = document.getElementById('q-niche').value.trim();
-    const maxCalls = readBudget().value;
+    const maxResults = String(readLimit().value);
     const maxDepth = readDepth().value;
     if (!location || !niche) return;
 
@@ -963,7 +984,7 @@
     const requireEmail = document.getElementById('q-requireemail').checked;
     const requireWebsite = document.getElementById('q-requirewebsite').checked;
 
-    const qs = new URLSearchParams({ location, niche, maxCalls, maxDepth });
+    const qs = new URLSearchParams({ location, niche, maxResults, maxDepth });
     // Blank means no filter — never sent, so the server cannot invent a default.
     if (minRating !== '') qs.set('minRating', minRating);
     if (minReviews !== '') qs.set('minReviews', minReviews);
@@ -1299,7 +1320,14 @@
       text += '<br><b>' + held + ' more phrasing' + (held === 1 ? '' : 's') + ' of this niche went unsearched</b> ' +
         '— set Terms to All to sweep them. Each one is a full pass of the area and finds firms the others miss. ';
     }
-    if (run.halted) text += '<br><b>Budget ran out</b> before the sweep finished — raise Max calls to cover the rest. ';
+    if (run.resultCapReached) {
+      text += '<br><b>Stopped at the ' + fmt(run.maxResults) + '-business limit.</b> ' +
+        'The area holds more than this — raise Max businesses to go further. ';
+    }
+    if (run.halted) {
+      text += '<br><b>The ' + fmt(run.maxCalls) + '-call ceiling ran out</b> before the sweep finished. ' +
+        'That ceiling guards Google's daily cap; raise MAX_CALLS in .env once billing is attached. ';
+    }
     if (run.aborted) text += '<br><b>Stopped early.</b> The search was cancelled, so this covers only part of the area. What had been paid for was still saved. ';
     if (run.truncatedLeaves > 0) text += '<br><b>' + run.truncatedLeaves + ' area(s) under-sampled</b> — Google held back more results than it would return. Raise Depth above ' + run.maxDepth + '.';
     el.innerHTML = text;
